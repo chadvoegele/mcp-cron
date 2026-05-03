@@ -52,7 +52,7 @@ func TestMCPServerCreation(t *testing.T) {
 	agentExecutor := agent.NewAgentExecutor(cfg, nil, logger)
 
 	// Create the server with custom config
-	mcpServer, err := server.NewMCPServer(cfg, cronScheduler, commandExecutor, agentExecutor, nil, logger)
+	mcpServer, err := server.NewMCPServer(cfg, cronScheduler, commandExecutor, agentExecutor, nil, nil, logger)
 
 	if err != nil {
 		t.Fatalf("Failed to create MCP server: %v", err)
@@ -102,7 +102,7 @@ func TestSchedulerContinuesAfterTransportExit(t *testing.T) {
 	cmdExec := command.NewCommandExecutor(resultStore, logger)
 	agentExec := agent.NewAgentExecutor(cfg, resultStore, logger)
 
-	srv, err := server.NewMCPServer(cfg, sched, cmdExec, agentExec, resultStore, logger)
+	srv, err := server.NewMCPServer(cfg, sched, cmdExec, agentExec, nil, resultStore, logger)
 	if err != nil {
 		t.Fatalf("NewMCPServer: %v", err)
 	}

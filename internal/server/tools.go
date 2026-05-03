@@ -55,6 +55,12 @@ func (s *MCPServer) registerToolsDeclarative() {
 			Parameters:  AITaskParams{},
 		},
 		{
+			Name:        "add_http_task",
+			Description: "Adds a new HTTP (webhook) task. Requires 'name' and 'url'. 'method' defaults to POST. 'headers' is a JSON object of string→string. 'body' is the request body. Provide 'schedule' for recurring execution or omit it to create an on-demand task triggered via run_task. The result captures HTTP status (as exit_code), response body preview (as output), and round-trip latency (as duration).",
+			Handler:     s.handleAddHTTPTask,
+			Parameters:  TaskParams{},
+		},
+		{
 			Name:        "update_task",
 			Description: "Updates an existing task. Requires 'id'. Only provided fields are updated; omitted fields remain unchanged.",
 			Handler:     s.handleUpdateTask,
@@ -201,6 +207,10 @@ func goTypeToJSONType(t reflect.Type) string {
 		return "integer"
 	case reflect.Float32, reflect.Float64:
 		return "number"
+	case reflect.Map:
+		return "object"
+	case reflect.Slice, reflect.Array:
+		return "array"
 	default:
 		return "string"
 	}

@@ -49,7 +49,7 @@ func TestNewMCPServer(t *testing.T) {
 	exec := command.NewCommandExecutor(nil, testLogger())
 	agentExec := agent.NewAgentExecutor(cfg, nil, testLogger())
 
-	server, err := NewMCPServer(cfg, sched, exec, agentExec, nil, testLogger())
+	server, err := NewMCPServer(cfg, sched, exec, agentExec, nil, nil, testLogger())
 	if err != nil {
 		t.Fatalf("Failed to create server with default config: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestNewMCPServerWithCustomConfig(t *testing.T) {
 	exec := command.NewCommandExecutor(nil, testLogger())
 	agentExec := agent.NewAgentExecutor(cfg, nil, testLogger())
 
-	server, err := NewMCPServer(cfg, sched, exec, agentExec, nil, testLogger())
+	server, err := NewMCPServer(cfg, sched, exec, agentExec, nil, nil, testLogger())
 	if err != nil {
 		t.Fatalf("Failed to create server with custom config: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestMCPServerStartStop(t *testing.T) {
 	exec := command.NewCommandExecutor(nil, testLogger())
 	agentExec := agent.NewAgentExecutor(cfg, nil, testLogger())
 
-	server, err := NewMCPServer(cfg, sched, exec, agentExec, nil, testLogger())
+	server, err := NewMCPServer(cfg, sched, exec, agentExec, nil, nil, testLogger())
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestTaskHandlers(t *testing.T) {
 	exec := command.NewCommandExecutor(nil, testLogger())
 	agentExec := agent.NewAgentExecutor(cfg, nil, testLogger())
 
-	server, err := NewMCPServer(cfg, sched, exec, agentExec, nil, testLogger())
+	server, err := NewMCPServer(cfg, sched, exec, agentExec, nil, nil, testLogger())
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestTaskCreationTimeFields(t *testing.T) {
 	exec := command.NewCommandExecutor(nil, testLogger())
 	agentExec := agent.NewAgentExecutor(cfg, nil, testLogger())
 
-	server, err := NewMCPServer(cfg, sched, exec, agentExec, nil, testLogger())
+	server, err := NewMCPServer(cfg, sched, exec, agentExec, nil, nil, testLogger())
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
