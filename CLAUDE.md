@@ -23,6 +23,7 @@ internal/
   command/             # Shell command executor (exec.CommandContext with timeout)
   config/              # Config structs, defaults, env var loading, validation
   errors/              # Typed errors: NotFound, AlreadyExists, InvalidInput, Internal
+  http/                # HTTP (webhook) task executor — issues a request, captures status/body/latency
   logging/             # Leveled logger (Debug/Info/Warn/Error/Fatal), file + stdout
   model/               # Core types: Task, Result, TaskType, TaskStatus, Executor, ResultStore interfaces
   scheduler/           # Poll-based DB scheduler (robfig/cron parser only), optimistic locking for multi-instance dedup
@@ -44,7 +45,7 @@ scripts/
 - **Vendor directory**: `vendor/` is gitignored — do NOT commit it. Dependencies are tracked via `go.mod` + `go.sum`; run `go mod vendor` locally to recreate.
 - **License header**: Every Go file starts with `// SPDX-License-Identifier: AGPL-3.0-only`
 - **Handler signature**: `func (s *MCPServer) handle<Name>(_ context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error)`
-- **Task types**: `shell_command` (runs a command) and `AI` (runs an LLM prompt)
+- **Task types**: `shell_command` (runs a command), `AI` (runs an LLM prompt), and `http` (issues an HTTP request — status → `exit_code`, body preview → `output`, latency → `duration`, URL persisted on the result row)
 - **Task statuses**: pending, running, completed, failed, disabled
 - **Storage**: In-memory read cache refreshed from SQLite on each poll tick; SQLite is the source of truth for task definitions and result history (`modernc.org/sqlite`, pure Go)
 - **Scheduling**: Poll-based — `next_run` column in `tasks` table, polled every `PollInterval` (default 1s). Optimistic locking (`UPDATE ... WHERE next_run = :current`) prevents duplicate execution across multiple instances sharing the same DB. Tasks can be **scheduled** (with a cron expression) or **on-demand** (no schedule, triggered via `run_task`).
@@ -57,7 +58,7 @@ scripts/
 
 ## MCP Tools Exposed
 
-list_tasks, get_task, get_task_result, query_task_result, add_task, add_ai_task, update_task, remove_task, run_task, enable_task, disable_task
+list_tasks, get_task, get_task_result, query_task_result, add_task, add_ai_task, add_http_task, update_task, remove_task, run_task, enable_task, disable_task
 
 ## Dependencies
 
