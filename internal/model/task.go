@@ -16,6 +16,7 @@ type TaskStatus string
 const (
 	TypeShellCommand TaskType = "shell_command"
 	TypeAI           TaskType = "AI"
+	TypeHTTP         TaskType = "http"
 )
 
 // Task status constants
@@ -39,6 +40,10 @@ type Task struct {
 	Description string     `json:"description"`
 	Command     string     `json:"command,omitempty" description:"command for shell"`
 	Prompt      string     `json:"prompt,omitempty" description:"prompt to use for AI"`
+	URL         string     `json:"url,omitempty" description:"URL for HTTP tasks"`
+	Method      string     `json:"method,omitempty" description:"HTTP method for HTTP tasks (default POST)"`
+	Headers     map[string]string `json:"headers,omitempty" description:"HTTP request headers for HTTP tasks"`
+	Body        string     `json:"body,omitempty" description:"HTTP request body for HTTP tasks"`
 	Schedule    string     `json:"schedule"`
 	Enabled     bool       `json:"enabled"`
 	Type        TaskType   `json:"type"`
@@ -49,11 +54,16 @@ type Task struct {
 	UpdatedAt   time.Time  `json:"updatedAt,omitempty"`
 }
 
-// Result contains the results of a task execution
+// Result contains the results of a task execution.
+//
+// For HTTP tasks, ExitCode holds the HTTP status code (or 0 if no response
+// was received) and Output holds a body preview. Error is set when the
+// request failed at the transport level or returned a non-2xx status.
 type Result struct {
 	TaskID    string    `json:"task_id"`
 	Command   string    `json:"command,omitempty" description:"command for shell"`
 	Prompt    string    `json:"prompt,omitempty" description:"prompt to use for AI"`
+	URL       string    `json:"url,omitempty" description:"URL for HTTP tasks"`
 	Output    string    `json:"output"`
 	Error     string    `json:"error,omitempty"`
 	ExitCode  int       `json:"exit_code"`

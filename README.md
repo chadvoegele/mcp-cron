@@ -242,13 +242,14 @@ The server exposes several tools through the MCP protocol:
 2. `get_task` - Gets a specific task by ID
 3. `add_task` - Adds a new shell command task (provide `schedule` for recurring, or omit for on-demand)
 4. `add_ai_task` - Adds a new AI (LLM) task with a prompt (provide `schedule` for recurring, or omit for on-demand)
-5. `update_task` - Updates an existing task
-6. `remove_task` - Removes a task by ID
-7. `run_task` - Executes a task by ID, waits for completion, and returns the result (for on-demand tasks or ad-hoc runs of scheduled tasks)
-8. `enable_task` - Enables a task so it runs on its schedule or can be triggered via `run_task`
-9. `disable_task` - Disables a task so it stops running and cannot be triggered
-10. `get_task_result` - Gets execution results for a task (latest by default, or recent history with `limit`)
-11. `query_task_result` - Runs a read-only SQL query against the database (SELECT only, capped at 1000 rows)
+5. `add_http_task` - Adds a new HTTP (webhook) task that issues an HTTP request to a `url` (provide `schedule` for recurring, or omit for on-demand)
+6. `update_task` - Updates an existing task
+7. `remove_task` - Removes a task by ID
+8. `run_task` - Executes a task by ID, waits for completion, and returns the result (for on-demand tasks or ad-hoc runs of scheduled tasks)
+9. `enable_task` - Enables a task so it runs on its schedule or can be triggered via `run_task`
+10. `disable_task` - Disables a task so it stops running and cannot be triggered
+11. `get_task_result` - Gets execution results for a task (latest by default, or recent history with `limit`)
+12. `query_task_result` - Runs a read-only SQL query against the database (SELECT only, capped at 1000 rows)
 
 ### Task Format
 
@@ -272,9 +273,23 @@ Tasks have the following structure:
 }
 ```
 
-For shell command tasks, use the `command` field to specify the command to execute.
-For AI tasks, use the `prompt` field to specify what the AI should do.
-The `type` field can be either `shell_command` (default) or `AI`.
+The `type` field can be `shell_command` (default), `AI`, or `http`. The fields that apply depend on the type:
+
+- **`shell_command`** — `command`: the shell command to execute.
+- **`AI`** — `prompt`: what the AI should do.
+- **`http`** — `url` (required), `method` (defaults to `POST`), `headers` (JSON object of string→string), and `body` (request body string). Created via `add_http_task`.
+
+For HTTP tasks, the result row reuses the existing columns:
+
+| Result field | Meaning for HTTP tasks |
+|---|---|
+| `exit_code` | HTTP status code (0 if no response was received) |
+| `output`    | Response body preview (capped at 8 KiB, suffixed `... (truncated)`) |
+| `error`     | Transport error, build-request error, or `non-2xx status: N <reason>` |
+| `duration`  | Round-trip latency |
+| `url`       | The request URL |
+
+This keeps `query_task_result` queries uniform — e.g. `SELECT COUNT(*) FROM results WHERE task_id='x' AND exit_code >= 200 AND exit_code < 300` counts successful HTTP calls.
 
 **Scheduled vs on-demand tasks:**
 - **Scheduled**: Provide a `schedule` (cron expression) — the task runs automatically on that schedule.

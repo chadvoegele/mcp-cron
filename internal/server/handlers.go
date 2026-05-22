@@ -150,3 +150,16 @@ func validateAITaskParams(name, prompt string) error {
 
 	return nil
 }
+
+// validateHTTPTaskParams validates the parameters specific to HTTP tasks
+func validateHTTPTaskParams(name, url string) error {
+	if err := validateTaskParams(name); err != nil {
+		return err
+	}
+
+	if url == "" {
+		return errors.InvalidInput("missing required field: url is required for http tasks")
+	}
+
+	return nil
+}

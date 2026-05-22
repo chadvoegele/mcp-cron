@@ -305,6 +305,86 @@ func TestSaveAndLoadAITask(t *testing.T) {
 	}
 }
 
+func TestSaveAndLoadHTTPTask(t *testing.T) {
+	s := newTestStore(t)
+
+	now := time.Now().Truncate(time.Microsecond)
+	task := &model.Task{
+		ID:       "http-task-1",
+		Name:     "Webhook Task",
+		Type:     "http",
+		URL:      "https://example.com/hook",
+		Method:   "POST",
+		Headers:  map[string]string{"Authorization": "Bearer secret", "X-Source": "mcp-cron"},
+		Body:     `{"hello":"world"}`,
+		Schedule: "@hourly",
+		Enabled:  true,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if err := s.SaveTask(task); err != nil {
+		t.Fatalf("SaveTask: %v", err)
+	}
+
+	tasks, err := s.LoadTasks()
+	if err != nil {
+		t.Fatalf("LoadTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+
+	got := tasks[0]
+	if got.Type != "http" {
+		t.Errorf("Type = %q, want %q", got.Type, "http")
+	}
+	if got.URL != task.URL {
+		t.Errorf("URL = %q, want %q", got.URL, task.URL)
+	}
+	if got.Method != "POST" {
+		t.Errorf("Method = %q, want %q", got.Method, "POST")
+	}
+	if got.Body != task.Body {
+		t.Errorf("Body = %q, want %q", got.Body, task.Body)
+	}
+	if got.Headers["Authorization"] != "Bearer secret" || got.Headers["X-Source"] != "mcp-cron" {
+		t.Errorf("Headers round-trip failed: %#v", got.Headers)
+	}
+}
+
+func TestSaveAndGetHTTPResult(t *testing.T) {
+	s := newTestStore(t)
+
+	now := time.Now().Truncate(time.Microsecond)
+	r := &model.Result{
+		TaskID:    "http-task-1",
+		URL:       "https://example.com/hook",
+		Output:    `{"ok":true}`,
+		ExitCode:  200,
+		StartTime: now,
+		EndTime:   now.Add(120 * time.Millisecond),
+		Duration:  "120ms",
+	}
+
+	if err := s.SaveResult(r); err != nil {
+		t.Fatalf("SaveResult: %v", err)
+	}
+	got, err := s.GetLatestResult("http-task-1")
+	if err != nil {
+		t.Fatalf("GetLatestResult: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected result, got nil")
+	}
+	if got.URL != r.URL {
+		t.Errorf("URL = %q, want %q", got.URL, r.URL)
+	}
+	if got.ExitCode != 200 {
+		t.Errorf("ExitCode = %d, want 200", got.ExitCode)
+	}
+}
+
 func TestUpdateTaskStore(t *testing.T) {
 	s := newTestStore(t)
 

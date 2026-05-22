@@ -19,6 +19,7 @@ import (
 	"github.com/jolks/mcp-cron/internal/command"
 	"github.com/jolks/mcp-cron/internal/config"
 	"github.com/jolks/mcp-cron/internal/errors"
+	httpexec "github.com/jolks/mcp-cron/internal/http"
 	"github.com/jolks/mcp-cron/internal/logging"
 	"github.com/jolks/mcp-cron/internal/model"
 	"github.com/jolks/mcp-cron/internal/scheduler"
@@ -30,13 +31,17 @@ var osOpenFile = os.OpenFile
 
 // TaskParams holds parameters for various task operations
 type TaskParams struct {
-	ID          string `json:"id,omitempty" description:"task ID"`
-	Name        string `json:"name" description:"task name (required)"`
-	Schedule    string `json:"schedule,omitempty" description:"cron expression for recurring execution (e.g. '*/5 * * * *', '@hourly'). Omit to create an on-demand task triggered via run_task."`
-	Type        string `json:"type,omitempty" description:"task type: 'shell_command' or 'AI'"`
-	Command     string `json:"command,omitempty" description:"shell command to execute (required for shell_command tasks)"`
-	Description string `json:"description,omitempty" description:"task description"`
-	Enabled     bool   `json:"enabled,omitempty" description:"whether the task is enabled (defaults to false; set to true to activate immediately)"`
+	ID          string            `json:"id,omitempty" description:"task ID"`
+	Name        string            `json:"name" description:"task name (required)"`
+	Schedule    string            `json:"schedule,omitempty" description:"cron expression for recurring execution (e.g. '*/5 * * * *', '@hourly'). Omit to create an on-demand task triggered via run_task."`
+	Type        string            `json:"type,omitempty" description:"task type: 'shell_command', 'AI', or 'http'"`
+	Command     string            `json:"command,omitempty" description:"shell command to execute (required for shell_command tasks)"`
+	URL         string            `json:"url,omitempty" description:"URL to request (required for http tasks)"`
+	Method      string            `json:"method,omitempty" description:"HTTP method for http tasks (default POST)"`
+	Headers     map[string]string `json:"headers,omitempty" description:"HTTP request headers for http tasks"`
+	Body        string            `json:"body,omitempty" description:"HTTP request body for http tasks"`
+	Description string            `json:"description,omitempty" description:"task description"`
+	Enabled     bool              `json:"enabled,omitempty" description:"whether the task is enabled (defaults to false; set to true to activate immediately)"`
 }
 
 // TaskIDParams holds the ID parameter used by multiple handlers
@@ -66,6 +71,7 @@ type MCPServer struct {
 	scheduler      *scheduler.Scheduler
 	cmdExecutor    *command.CommandExecutor
 	agentExecutor  *agent.AgentExecutor
+	httpExecutor   *httpexec.HTTPExecutor
 	resultStore    model.ResultStore
 	server         *mcp.Server
 	httpServer     *http.Server
@@ -124,8 +130,12 @@ func CreateLogger(cfg *config.Config) (*logging.Logger, error) {
 	}), nil
 }
 
-// NewMCPServer creates a new MCP scheduler server
-func NewMCPServer(cfg *config.Config, scheduler *scheduler.Scheduler, cmdExecutor *command.CommandExecutor, agentExecutor *agent.AgentExecutor, resultStore model.ResultStore, logger *logging.Logger) (*MCPServer, error) {
+// NewMCPServer creates a new MCP scheduler server.
+//
+// httpExecutor is optional: passing nil disables the http task type at
+// execution time (handlers still accept add_http_task and the scheduler
+// will route it, but Execute will return an error).
+func NewMCPServer(cfg *config.Config, scheduler *scheduler.Scheduler, cmdExecutor *command.CommandExecutor, agentExecutor *agent.AgentExecutor, httpExecutor *httpexec.HTTPExecutor, resultStore model.ResultStore, logger *logging.Logger) (*MCPServer, error) {
 	// Create default config if not provided
 	if cfg == nil {
 		cfg = config.DefaultConfig()
@@ -152,6 +162,7 @@ func NewMCPServer(cfg *config.Config, scheduler *scheduler.Scheduler, cmdExecuto
 		scheduler:     scheduler,
 		cmdExecutor:   cmdExecutor,
 		agentExecutor: agentExecutor,
+		httpExecutor:  httpExecutor,
 		resultStore:   resultStore,
 		server:        mcpSrv,
 		address:       cfg.Server.Address,
@@ -340,6 +351,35 @@ func (s *MCPServer) handleAddAITask(_ context.Context, request *mcp.CallToolRequ
 	return createTaskResponse(task)
 }
 
+// handleAddHTTPTask adds a new HTTP/webhook task. Headers and body are optional;
+// method defaults to POST when omitted.
+func (s *MCPServer) handleAddHTTPTask(_ context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var params TaskParams
+
+	if err := extractParams(request, &params); err != nil {
+		return nil, err
+	}
+
+	if err := validateHTTPTaskParams(params.Name, params.URL); err != nil {
+		return nil, err
+	}
+
+	s.logger.Debugf("Handling add_http_task request for task %s", params.Name)
+
+	task := createBaseTask(params.Name, params.Schedule, params.Description, params.Enabled)
+	task.Type = model.TypeHTTP
+	task.URL = params.URL
+	task.Method = params.Method
+	task.Headers = params.Headers
+	task.Body = params.Body
+
+	if err := s.scheduler.AddTask(task); err != nil {
+		return nil, err
+	}
+
+	return createTaskResponse(task)
+}
+
 // createBaseTask creates a base task with common fields initialized
 func createBaseTask(name, schedule, description string, enabled bool) *model.Task {
 	now := time.Now()
@@ -405,16 +445,31 @@ func updateTaskFields(task *model.Task, params AITaskParams, rawJSON []byte) {
 	if params.Prompt != "" {
 		task.Prompt = params.Prompt
 	}
+	if params.URL != "" {
+		task.URL = params.URL
+	}
+	if params.Method != "" {
+		task.Method = params.Method
+	}
+	if params.Headers != nil {
+		task.Headers = params.Headers
+	}
+	if params.Body != "" {
+		task.Body = params.Body
+	}
 	if params.Description != "" {
 		task.Description = params.Description
 	}
 
 	// Update task type if provided
 	if params.Type != "" {
-		if strings.EqualFold(params.Type, string(model.TypeAI)) {
+		switch {
+		case strings.EqualFold(params.Type, string(model.TypeAI)):
 			task.Type = model.TypeAI
-		} else if strings.EqualFold(params.Type, string(model.TypeShellCommand)) {
+		case strings.EqualFold(params.Type, string(model.TypeShellCommand)):
 			task.Type = model.TypeShellCommand
+		case strings.EqualFold(params.Type, string(model.TypeHTTP)):
+			task.Type = model.TypeHTTP
 		}
 	}
 
@@ -629,6 +684,13 @@ func (s *MCPServer) Execute(ctx context.Context, task *model.Task, timeout time.
 		// Use the agent executor for AI tasks
 		s.logger.Infof("Routing to AgentExecutor for AI task")
 		return s.agentExecutor.Execute(ctx, task, timeout)
+
+	case model.TypeHTTP:
+		s.logger.Infof("Routing to HTTPExecutor for HTTP task")
+		if s.httpExecutor == nil {
+			return fmt.Errorf("http executor not configured")
+		}
+		return s.httpExecutor.Execute(ctx, task, timeout)
 
 	case model.TypeShellCommand, "":
 		// Use the command executor for shell command tasks or when type is not specified

@@ -14,6 +14,7 @@ import (
 	"github.com/jolks/mcp-cron/internal/agent"
 	"github.com/jolks/mcp-cron/internal/command"
 	"github.com/jolks/mcp-cron/internal/config"
+	httpexec "github.com/jolks/mcp-cron/internal/http"
 	"github.com/jolks/mcp-cron/internal/logging"
 	"github.com/jolks/mcp-cron/internal/model"
 	"github.com/jolks/mcp-cron/internal/scheduler"
@@ -149,6 +150,7 @@ type Application struct {
 	scheduler     *scheduler.Scheduler
 	cmdExecutor   *command.CommandExecutor
 	agentExecutor *agent.AgentExecutor
+	httpExecutor  *httpexec.HTTPExecutor
 	resultStore   model.ResultStore
 	server        *server.MCPServer
 	logger        *logging.Logger
@@ -174,11 +176,12 @@ func createApp(cfg *config.Config) (*Application, error) {
 	// Create components
 	cmdExec := command.NewCommandExecutor(resultStore, logger)
 	agentExec := agent.NewAgentExecutor(cfg, resultStore, logger)
+	httpExec := httpexec.NewHTTPExecutor(resultStore, logger)
 	sched := scheduler.NewScheduler(&cfg.Scheduler, logger)
 	sched.SetTaskStore(resultStore)
 
 	// Create the MCP server
-	mcpServer, err := server.NewMCPServer(cfg, sched, cmdExec, agentExec, resultStore, logger)
+	mcpServer, err := server.NewMCPServer(cfg, sched, cmdExec, agentExec, httpExec, resultStore, logger)
 	if err != nil {
 		_ = resultStore.Close()
 		return nil, err
@@ -189,6 +192,7 @@ func createApp(cfg *config.Config) (*Application, error) {
 		scheduler:     sched,
 		cmdExecutor:   cmdExec,
 		agentExecutor: agentExec,
+		httpExecutor:  httpExec,
 		resultStore:   resultStore,
 		server:        mcpServer,
 		logger:        logger,

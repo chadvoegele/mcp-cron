@@ -4,6 +4,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,11 +60,12 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 // SaveResult persists a task execution result.
 func (s *SQLiteStore) SaveResult(result *model.Result) error {
 	_, err := s.db.Exec(`
-		INSERT INTO results (task_id, command, prompt, output, error, exit_code, start_time, end_time, duration)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO results (task_id, command, prompt, url, output, error, exit_code, start_time, end_time, duration)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		result.TaskID,
 		result.Command,
 		result.Prompt,
+		result.URL,
 		result.Output,
 		result.Error,
 		result.ExitCode,
@@ -101,7 +103,7 @@ func (s *SQLiteStore) GetResults(taskID string, limit int) ([]*model.Result, err
 	}
 
 	rows, err := s.db.Query(`
-		SELECT task_id, command, prompt, output, error, exit_code, start_time, end_time, duration
+		SELECT task_id, command, prompt, url, output, error, exit_code, start_time, end_time, duration
 		FROM results
 		WHERE task_id = ?
 		ORDER BY start_time DESC
@@ -116,7 +118,7 @@ func (s *SQLiteStore) GetResults(taskID string, limit int) ([]*model.Result, err
 		var r model.Result
 		var startStr, endStr string
 		if err := rows.Scan(
-			&r.TaskID, &r.Command, &r.Prompt, &r.Output,
+			&r.TaskID, &r.Command, &r.Prompt, &r.URL, &r.Output,
 			&r.Error, &r.ExitCode, &startStr, &endStr, &r.Duration,
 		); err != nil {
 			return nil, fmt.Errorf("scan result row: %w", err)
@@ -138,15 +140,23 @@ func (s *SQLiteStore) SaveTask(task *model.Task) error {
 	if !task.NextRun.IsZero() {
 		nextRun = task.NextRun.Format(timeFormat)
 	}
-	_, err := s.db.Exec(`
-		INSERT INTO tasks (id, name, description, type, command, prompt, schedule, enabled, created_at, updated_at, next_run)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	headersJSON, err := marshalHeaders(task.Headers)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+		INSERT INTO tasks (id, name, description, type, command, prompt, url, method, headers_json, body, schedule, enabled, created_at, updated_at, next_run)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.ID,
 		task.Name,
 		task.Description,
 		task.Type,
 		task.Command,
 		task.Prompt,
+		task.URL,
+		task.Method,
+		headersJSON,
+		task.Body,
 		task.Schedule,
 		boolToInt(task.Enabled),
 		task.CreatedAt.Format(timeFormat),
@@ -165,14 +175,22 @@ func (s *SQLiteStore) UpdateTask(task *model.Task) error {
 	if !task.NextRun.IsZero() {
 		nextRun = task.NextRun.Format(timeFormat)
 	}
+	headersJSON, err := marshalHeaders(task.Headers)
+	if err != nil {
+		return err
+	}
 	result, err := s.db.Exec(`
-		UPDATE tasks SET name=?, description=?, type=?, command=?, prompt=?, schedule=?, enabled=?, updated_at=?, next_run=?
+		UPDATE tasks SET name=?, description=?, type=?, command=?, prompt=?, url=?, method=?, headers_json=?, body=?, schedule=?, enabled=?, updated_at=?, next_run=?
 		WHERE id=?`,
 		task.Name,
 		task.Description,
 		task.Type,
 		task.Command,
 		task.Prompt,
+		task.URL,
+		task.Method,
+		headersJSON,
+		task.Body,
 		task.Schedule,
 		boolToInt(task.Enabled),
 		task.UpdatedAt.Format(timeFormat),
@@ -205,10 +223,11 @@ func (s *SQLiteStore) DeleteTask(taskID string) error {
 func scanTask(rows *sql.Rows) (*model.Task, error) {
 	var t model.Task
 	var enabled int
-	var createdStr, updatedStr, nextRunStr string
+	var createdStr, updatedStr, nextRunStr, headersJSON string
 	if err := rows.Scan(
 		&t.ID, &t.Name, &t.Description, &t.Type,
-		&t.Command, &t.Prompt, &t.Schedule,
+		&t.Command, &t.Prompt, &t.URL, &t.Method, &headersJSON, &t.Body,
+		&t.Schedule,
 		&enabled, &createdStr, &updatedStr, &nextRunStr,
 	); err != nil {
 		return nil, fmt.Errorf("scan task row: %w", err)
@@ -219,6 +238,9 @@ func scanTask(rows *sql.Rows) (*model.Task, error) {
 	if nextRunStr != "" {
 		t.NextRun, _ = time.Parse(timeFormat, nextRunStr)
 	}
+	if headersJSON != "" {
+		_ = json.Unmarshal([]byte(headersJSON), &t.Headers)
+	}
 	t.Status = model.StatusPending
 	return &t, nil
 }
@@ -226,7 +248,7 @@ func scanTask(rows *sql.Rows) (*model.Task, error) {
 // LoadTasks returns all persisted task definitions.
 func (s *SQLiteStore) LoadTasks() ([]*model.Task, error) {
 	rows, err := s.db.Query(`
-		SELECT id, name, description, type, command, prompt, schedule, enabled, created_at, updated_at, next_run
+		SELECT id, name, description, type, command, prompt, url, method, headers_json, body, schedule, enabled, created_at, updated_at, next_run
 		FROM tasks`)
 	if err != nil {
 		return nil, fmt.Errorf("query tasks: %w", err)
@@ -253,7 +275,7 @@ func (s *SQLiteStore) LoadTasks() ([]*model.Task, error) {
 // GetDueTasks returns all enabled tasks whose next_run is at or before the given time.
 func (s *SQLiteStore) GetDueTasks(now time.Time) ([]*model.Task, error) {
 	rows, err := s.db.Query(`
-		SELECT id, name, description, type, command, prompt, schedule, enabled, created_at, updated_at, next_run
+		SELECT id, name, description, type, command, prompt, url, method, headers_json, body, schedule, enabled, created_at, updated_at, next_run
 		FROM tasks
 		WHERE enabled = 1 AND next_run != '' AND next_run <= ?`,
 		now.Format(timeFormat))
@@ -410,6 +432,19 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// marshalHeaders serializes a header map as a JSON object string for storage.
+// Returns "" for nil/empty maps so empty rows stay readable in sqlite_master dumps.
+func marshalHeaders(h map[string]string) (string, error) {
+	if len(h) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(h)
+	if err != nil {
+		return "", fmt.Errorf("marshal headers: %w", err)
+	}
+	return string(b), nil
 }
 
 // Close closes the underlying database connection.

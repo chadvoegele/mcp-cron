@@ -62,6 +62,24 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		version: 4,
+		up: func(tx *sql.Tx) error {
+			stmts := []string{
+				`ALTER TABLE tasks ADD COLUMN url TEXT DEFAULT ''`,
+				`ALTER TABLE tasks ADD COLUMN method TEXT DEFAULT ''`,
+				`ALTER TABLE tasks ADD COLUMN headers_json TEXT DEFAULT ''`,
+				`ALTER TABLE tasks ADD COLUMN body TEXT DEFAULT ''`,
+				`ALTER TABLE results ADD COLUMN url TEXT DEFAULT ''`,
+			}
+			for _, s := range stmts {
+				if _, err := tx.Exec(s); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // runMigrations ensures the schema_version table exists and runs any pending migrations.
