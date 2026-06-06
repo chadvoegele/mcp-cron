@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -53,8 +54,14 @@ func (ce *CommandExecutor) ExecuteCommand(ctx context.Context, taskID, command s
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Prepare the command
-	cmd := exec.CommandContext(execCtx, "sh", "-c", command)
+	// Prepare the command (cross-platform shell support)
+	shellName := "sh"
+	shellFlag := "-c"
+	if runtime.GOOS == "windows" {
+		shellName = "cmd"
+		shellFlag = "/c"
+	}
+	cmd := exec.CommandContext(execCtx, shellName, shellFlag, command)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
