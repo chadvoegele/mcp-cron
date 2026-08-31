@@ -141,6 +141,13 @@ func RunTask(ctx context.Context, t *model.Task, cfg *config.Config, resultStore
 	logger := logging.GetDefaultLogger().WithField("task_id", t.ID)
 	logger.Infof("Running AI task: %s", t.Name)
 
+	// ACP agents own their model and MCP configuration. Dispatch before loading
+	// mcp-cron's MCP configuration, injecting internal tools, or constructing an
+	// API provider so ACP mode remains independent of those settings.
+	if strings.EqualFold(cfg.AI.Provider, config.ProviderACP) {
+		return RunACPTask(ctx, t.Prompt, cfg)
+	}
+
 	// Get tools for the AI agent from MCP config
 	tools, mcpDispatcher, closeMCP, err := buildToolsFromConfig(cfg)
 	if closeMCP != nil {

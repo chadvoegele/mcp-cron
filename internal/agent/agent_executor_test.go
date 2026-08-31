@@ -2,11 +2,13 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -147,6 +149,203 @@ func TestExecuteAgentTaskWithError(t *testing.T) {
 	if result.Error != mockError {
 		t.Errorf("Expected Error '%s', got '%s'", mockError, result.Error)
 	}
+}
+
+func TestExecuteAgentTaskACPResultLifecycle(t *testing.T) {
+	store := newMockResultStore()
+	cfg := config.DefaultConfig()
+	cfg.AI.Provider = config.ProviderACP
+	cfg.AI.ACPSocket = startACPResultServer(t, "completed output", "end_turn")
+	cfg.AI.ACPCWD = "/workspace"
+	executor := NewAgentExecutor(cfg, store, testLogger())
+
+	result := executor.ExecuteAgentTask(context.Background(), "acp-success", "complete this", time.Second)
+	if result.Error != "" {
+		t.Fatalf("Error = %q, want empty", result.Error)
+	}
+	if result.Output != "completed output" {
+		t.Fatalf("Output = %q, want %q", result.Output, "completed output")
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	if result.StartTime.IsZero() || result.EndTime.IsZero() || !result.EndTime.After(result.StartTime) || result.Duration == "" {
+		t.Fatalf("invalid timing fields: start=%v end=%v duration=%q", result.StartTime, result.EndTime, result.Duration)
+	}
+
+	persisted, err := store.GetLatestResult("acp-success")
+	if err != nil {
+		t.Fatalf("GetLatestResult returned error: %v", err)
+	}
+	if persisted != result {
+		t.Fatalf("persisted result = %#v, want the executed result %#v", persisted, result)
+	}
+}
+
+func TestExecuteAgentTaskACPFailurePreservesPartialOutput(t *testing.T) {
+	store := newMockResultStore()
+	cfg := config.DefaultConfig()
+	cfg.AI.Provider = config.ProviderACP
+	cfg.AI.ACPSocket = startACPResultServer(t, "partial output", "max_tokens")
+	cfg.AI.ACPCWD = "/workspace"
+	executor := NewAgentExecutor(cfg, store, testLogger())
+
+	result := executor.ExecuteAgentTask(context.Background(), "acp-failure", "stop after a partial response", time.Second)
+	if !strings.Contains(result.Error, "max_tokens") {
+		t.Fatalf("Error = %q, want max_tokens diagnostic", result.Error)
+	}
+	if result.Output != "partial output" {
+		t.Fatalf("Output = %q, want partial ACP output", result.Output)
+	}
+	if result.ExitCode != 1 {
+		t.Fatalf("ExitCode = %d, want 1", result.ExitCode)
+	}
+
+	persisted, err := store.GetLatestResult("acp-failure")
+	if err != nil {
+		t.Fatalf("GetLatestResult returned error: %v", err)
+	}
+	if persisted == nil || persisted.Output != "partial output" || persisted.ExitCode != 1 {
+		t.Fatalf("persisted result = %#v, want failed result with partial output", persisted)
+	}
+}
+
+func TestExecuteAgentTaskACPFailureUsesErrorOutputFallback(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AI.Provider = config.ProviderACP
+	cfg.AI.ACPSocket = startACPResultServer(t, "", "refusal")
+	cfg.AI.ACPCWD = "/workspace"
+	executor := NewAgentExecutor(cfg, nil, testLogger())
+
+	result := executor.ExecuteAgentTask(context.Background(), "acp-empty-failure", "fail without output", time.Second)
+	if result.Output == "" || !strings.Contains(result.Output, "Error executing AI task") {
+		t.Fatalf("Output = %q, want error-output fallback", result.Output)
+	}
+	if result.ExitCode != 1 || result.Error == "" {
+		t.Fatalf("failed result = %#v, want exit code 1 and an error", result)
+	}
+}
+
+func TestExecuteAgentTaskACPTimeoutPersistsPartialOutput(t *testing.T) {
+	promptReceived := make(chan struct{})
+	cancelReceived := make(chan struct{}, 1)
+	socketPath := startACPServer(t, func(conn net.Conn, scanner *bufio.Scanner) error {
+		request, err := readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if err := writeACPResponse(conn, request.ID, `{"protocolVersion":1,"authMethods":[]}`); err != nil {
+			return err
+		}
+		request, err = readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if err := writeACPResponse(conn, request.ID, `{"sessionId":"timeout-test"}`); err != nil {
+			return err
+		}
+		request, err = readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if request.Method != "session/prompt" {
+			return fmt.Errorf("request method = %q, want session/prompt", request.Method)
+		}
+		if _, err := fmt.Fprintln(conn, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"timeout-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"before timeout"}}}}`); err != nil {
+			return err
+		}
+		close(promptReceived)
+
+		for scanner.Scan() {
+			var notification struct {
+				Method string `json:"method"`
+			}
+			if err := json.Unmarshal(scanner.Bytes(), &notification); err != nil {
+				return err
+			}
+			if notification.Method == "session/cancel" {
+				cancelReceived <- struct{}{}
+				return nil
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			return err
+		}
+		return errors.New("client closed before sending session/cancel")
+	})
+
+	store := newMockResultStore()
+	cfg := config.DefaultConfig()
+	cfg.AI.Provider = config.ProviderACP
+	cfg.AI.ACPSocket = socketPath
+	cfg.AI.ACPCWD = "/workspace"
+	executor := NewAgentExecutor(cfg, store, testLogger())
+
+	result := executor.ExecuteAgentTask(context.Background(), "acp-timeout", "wait for timeout", 100*time.Millisecond)
+	if result.Error == "" {
+		t.Fatal("Error is empty, want timeout/cancellation diagnostic")
+	}
+	if result.Output != "before timeout" {
+		t.Fatalf("Output = %q, want partial output", result.Output)
+	}
+	if result.ExitCode != 1 {
+		t.Fatalf("ExitCode = %d, want 1", result.ExitCode)
+	}
+	select {
+	case <-cancelReceived:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for session/cancel")
+	}
+
+	persisted, err := store.GetLatestResult("acp-timeout")
+	if err != nil {
+		t.Fatalf("GetLatestResult returned error: %v", err)
+	}
+	if persisted == nil || persisted.Output != "before timeout" || persisted.ExitCode != 1 || persisted.Error == "" {
+		t.Fatalf("persisted result = %#v, want failed result with partial output", persisted)
+	}
+}
+
+func startACPResultServer(t *testing.T, output, stopReason string) string {
+	t.Helper()
+
+	return startACPServer(t, func(conn net.Conn, scanner *bufio.Scanner) error {
+		request, err := readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if request.Method != "initialize" {
+			return fmt.Errorf("first request method = %q, want initialize", request.Method)
+		}
+		if err := writeACPResponse(conn, request.ID, `{"protocolVersion":1,"authMethods":[]}`); err != nil {
+			return err
+		}
+
+		request, err = readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if request.Method != "session/new" {
+			return fmt.Errorf("second request method = %q, want session/new", request.Method)
+		}
+		if err := writeACPResponse(conn, request.ID, `{"sessionId":"result-test"}`); err != nil {
+			return err
+		}
+
+		request, err = readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if request.Method != "session/prompt" {
+			return fmt.Errorf("third request method = %q, want session/prompt", request.Method)
+		}
+		if output != "" {
+			if _, err := fmt.Fprintf(conn, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"result-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":%q}}}}`+"\n", output); err != nil {
+				return err
+			}
+		}
+		return writeACPResponse(conn, request.ID, fmt.Sprintf(`{"stopReason":%q}`, stopReason))
+	})
 }
 
 // Execute overrides the base implementation for testing
