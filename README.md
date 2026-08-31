@@ -168,11 +168,13 @@ The following command line arguments are supported:
 | `--log-level` | Logging level: `debug`, `info`, `warn`, `error`, `fatal` | `info` |
 | `--log-file` | Log file path | stdout |
 | `--version` | Show version information and exit | `false` |
-| `--ai-provider` | AI provider: `openai` or `anthropic` | `openai` |
-| `--ai-base-url` | Custom base URL for OpenAI-compatible endpoints (e.g. Ollama, vLLM, Groq, LiteLLM) | Not set |
-| `--ai-model` | AI model to use for AI tasks | `gpt-4o` |
+| `--ai-provider` | AI provider: `openai`, `anthropic`, or `acp` | `openai` |
+| `--ai-base-url` | Custom base URL for OpenAI-compatible endpoints (ignored with `--ai-provider acp`) | Not set |
+| `--ai-model` | AI model to use for AI tasks (ignored with `--ai-provider acp`) | `gpt-4o` |
 | `--ai-max-iterations` | Maximum iterations for tool-enabled AI tasks | `20` |
-| `--mcp-config-path` | Path to MCP configuration file | `~/.cursor/mcp.json` |
+| `--mcp-config-path` | Path to MCP configuration file (ignored with `--ai-provider acp`) | `~/.cursor/mcp.json` |
+| `--acp-socket` | Absolute Unix socket path for the ACP agent (required with `--ai-provider acp`) | Not set |
+| `--acp-cwd` | Absolute working directory for ACP sessions (required with `--ai-provider acp`) | Not set |
 | `--db-path` | Path to SQLite database for result history | `~/.mcp-cron/results.db` |
 | `--prevent-sleep` | Prevent system from sleeping while mcp-cron is running (macOS and Windows) | `false` |
 | `--poll-interval` | How often to check for due tasks | `1s` |
@@ -191,18 +193,36 @@ The following environment variables are supported:
 | `MCP_CRON_SCHEDULER_DEFAULT_TIMEOUT` | Default timeout for task execution | `10m` |
 | `MCP_CRON_LOGGING_LEVEL` | Logging level: `debug`, `info`, `warn`, `error`, `fatal` | `info` |
 | `MCP_CRON_LOGGING_FILE` | Log file path | stdout |
-| `MCP_CRON_AI_PROVIDER` | AI provider: `openai` or `anthropic` | `openai` |
-| `MCP_CRON_AI_BASE_URL` | Custom base URL for OpenAI-compatible endpoints (e.g. Ollama, vLLM, Groq, LiteLLM) | Not set |
+| `MCP_CRON_AI_PROVIDER` | AI provider: `openai`, `anthropic`, or `acp` | `openai` |
+| `MCP_CRON_AI_BASE_URL` | Custom base URL for OpenAI-compatible endpoints (ignored with ACP provider) | Not set |
 | `MCP_CRON_AI_API_KEY` | Generic fallback API key (used when provider-specific key is not set) | Not set |
 | `OPENAI_API_KEY` | OpenAI API key for AI tasks | Not set |
 | `ANTHROPIC_API_KEY` | Anthropic API key for AI tasks | Not set |
 | `MCP_CRON_ENABLE_OPENAI_TESTS` | Enable OpenAI integration tests | `false` |
-| `MCP_CRON_AI_MODEL` | LLM model to use for AI tasks | `gpt-4o` |
+| `MCP_CRON_AI_MODEL` | LLM model to use for AI tasks (ignored with ACP provider) | `gpt-4o` |
 | `MCP_CRON_AI_MAX_TOOL_ITERATIONS` | Maximum iterations for tool-enabled tasks | `20` |
-| `MCP_CRON_MCP_CONFIG_FILE_PATH` | Path to MCP configuration file | `~/.cursor/mcp.json` |
+| `MCP_CRON_MCP_CONFIG_FILE_PATH` | Path to MCP configuration file (ignored with ACP provider) | `~/.cursor/mcp.json` |
+| `MCP_CRON_ACP_SOCKET` | Absolute Unix socket path for the ACP agent | Not set |
+| `MCP_CRON_ACP_CWD` | Absolute working directory for ACP sessions | Not set |
 | `MCP_CRON_STORE_DB_PATH` | Path to SQLite database for result history | `~/.mcp-cron/results.db` |
 | `MCP_CRON_PREVENT_SLEEP` | Prevent system from sleeping while mcp-cron is running (macOS and Windows) | `false` |
 | `MCP_CRON_POLL_INTERVAL` | How often to check for due tasks (Go duration format) | `1s` |
+
+### Using an ACP agent
+
+To route AI tasks through an already-running Agent Client Protocol (ACP) agent,
+select the `acp` provider and provide its Unix socket and working directory:
+
+```bash
+mcp-cron --transport stdio \
+  --ai-provider acp \
+  --acp-socket /run/my-agent/acp.sock \
+  --acp-cwd /home/chad/project
+```
+
+Both ACP paths must be absolute. ACP mode does not require OpenAI or Anthropic
+credentials and ignores the AI model, base URL, and mcp-cron MCP configuration
+settings; those are owned by the ACP agent.
 
 ### Sleep Prevention
 

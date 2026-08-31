@@ -2,10 +2,16 @@
 package agent
 
 import (
+	"bufio"
+	"context"
+	"fmt"
+	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jolks/mcp-cron/internal/config"
+	"github.com/jolks/mcp-cron/internal/model"
 )
 
 func TestNewChatProvider_DefaultIsResponsesAPI(t *testing.T) {
@@ -160,6 +166,62 @@ func TestNewChatProvider_OpenAIKeyTakesPrecedence(t *testing.T) {
 	}
 	if _, ok := provider.(*OpenAIResponsesProvider); !ok {
 		t.Errorf("Expected *OpenAIResponsesProvider, got %T", provider)
+	}
+}
+
+func TestRunTaskACPBypassesMCPAndAPIProvider(t *testing.T) {
+	const prompt = "run through the ACP agent"
+	socketPath := startACPServer(t, func(conn net.Conn, scanner *bufio.Scanner) error {
+		request, err := readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if request.Method != "initialize" {
+			return fmt.Errorf("first request method = %q, want initialize", request.Method)
+		}
+		if err := writeACPResponse(conn, request.ID, `{"protocolVersion":1,"authMethods":[]}`); err != nil {
+			return err
+		}
+
+		request, err = readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if request.Method != "session/new" {
+			return fmt.Errorf("second request method = %q, want session/new", request.Method)
+		}
+		if err := writeACPResponse(conn, request.ID, `{"sessionId":"dispatch-test"}`); err != nil {
+			return err
+		}
+
+		request, err = readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if request.Method != "session/prompt" {
+			return fmt.Errorf("third request method = %q, want session/prompt", request.Method)
+		}
+		if _, err := fmt.Fprintln(conn, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"dispatch-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ACP output"}}}}`); err != nil {
+			return err
+		}
+		return writeACPResponse(conn, request.ID, `{"stopReason":"end_turn"}`)
+	})
+
+	cfg := config.DefaultConfig()
+	cfg.AI.Provider = config.ProviderACP
+	cfg.AI.ACPSocket = socketPath
+	cfg.AI.ACPCWD = "/workspace"
+	cfg.AI.MCPConfigFilePath = filepath.Join(t.TempDir(), "missing-mcp.json")
+	cfg.AI.OpenAIAPIKey = ""
+	cfg.AI.AnthropicAPIKey = ""
+	cfg.AI.APIKey = ""
+
+	output, err := RunTask(context.Background(), &model.Task{ID: "dispatch-test", Prompt: prompt}, cfg, newMockResultStore())
+	if err != nil {
+		t.Fatalf("RunTask returned error: %v", err)
+	}
+	if output != "ACP output" {
+		t.Fatalf("output = %q, want %q", output, "ACP output")
 	}
 }
 

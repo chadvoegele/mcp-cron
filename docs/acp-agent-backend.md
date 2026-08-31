@@ -81,7 +81,7 @@ Each task execution must create one isolated connection and session:
 1. Dial the socket with a 10-second connection deadline. The dial must also respect the task execution context.
 2. Construct an ACP client-side connection over the bidirectional Unix socket using the selected, pinned Go ACP SDK.
 3. Call `initialize` with protocol version 1 and no filesystem, terminal, or authentication client capabilities.
-4. Require the initialize response to negotiate protocol version 1 and contain no authentication methods. If authentication methods are advertised, fail with an unsupported-authentication error; `authenticate` is not called.
+4. Require the initialize response to negotiate protocol version 1. Treat advertised authentication methods as optional; mcp-cron does not call `authenticate`. If a later request returns an authentication-required error, fail the task.
 5. Call `session/new` with the configured working directory and a non-nil empty `mcpServers` array.
 6. Call `session/prompt` with the task prompt as one text content block.
 7. Receive `session/update` notifications while the prompt runs.
@@ -142,7 +142,8 @@ Verify:
 - ACP mode does not require API keys and ignores model, base URL, and MCP configuration settings.
 - Socket connection failures produce failed results and close resources.
 - `initialize`, `session/new`, and `session/prompt` receive the expected requests, including protocol version 1, working directory, empty MCP servers, and prompt text.
-- Authentication methods are rejected without calling `authenticate`.
+- Advertised authentication methods, including `pi_terminal_login`, are accepted without calling `authenticate`.
+- Later authentication-required responses persist failed results.
 - Multiple text message chunks are aggregated in order and non-text updates are ignored.
 - Every defined stop reason and unknown stop reasons map correctly.
 - Task timeout causes `session/cancel`, closes the socket, and persists a failed result.

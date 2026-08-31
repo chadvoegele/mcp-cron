@@ -27,6 +27,8 @@ import (
 type integrationOpts struct {
 	withStore    bool
 	pollInterval time.Duration
+	dbPath       string
+	configure    func(*config.Config)
 }
 
 // createIntegrationTestServer creates an MCPServer with a started scheduler
@@ -42,6 +44,9 @@ func createIntegrationTestServer(t *testing.T, opts ...integrationOpts) *MCPServ
 
 	cfg := config.DefaultConfig()
 	cfg.AI.MCPConfigFilePath = filepath.Join(t.TempDir(), "mcp.json") // no real MCP servers
+	if opt.configure != nil {
+		opt.configure(cfg)
+	}
 	if opt.pollInterval > 0 {
 		cfg.Scheduler.PollInterval = opt.pollInterval
 	}
@@ -51,7 +56,10 @@ func createIntegrationTestServer(t *testing.T, opts ...integrationOpts) *MCPServ
 		taskStore   model.TaskStore
 	)
 	if opt.withStore {
-		dbPath := filepath.Join(t.TempDir(), "integration.db")
+		dbPath := opt.dbPath
+		if dbPath == "" {
+			dbPath = filepath.Join(t.TempDir(), "integration.db")
+		}
 		sqlStore, err := store.NewSQLiteStore(dbPath)
 		if err != nil {
 			t.Fatalf("NewSQLiteStore: %v", err)
@@ -87,6 +95,7 @@ func createIntegrationTestServer(t *testing.T, opts ...integrationOpts) *MCPServ
 
 	t.Cleanup(func() {
 		cancel()
+		_ = sched.Stop()
 	})
 
 	return srv
@@ -239,7 +248,6 @@ func mustDisableTask(t *testing.T, srv *MCPServer, id string) model.Task {
 	parseResponse(t, result, &task)
 	return task
 }
-
 
 // waitForNResults polls the result store until at least n results exist for
 // the given task, or the deadline expires.

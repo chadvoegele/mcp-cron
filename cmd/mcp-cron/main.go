@@ -31,11 +31,13 @@ var (
 	logLevel        = flag.String("log-level", "", "Logging level: debug, info, warn, error, fatal")
 	logFile         = flag.String("log-file", "", "Log file path (default: stdout)")
 	version         = flag.Bool("version", false, "Show version information and exit")
-	aiProvider      = flag.String("ai-provider", "", "AI provider: openai or anthropic (default: openai)")
-	aiBaseURL       = flag.String("ai-base-url", "", "Custom base URL for OpenAI-compatible endpoints (e.g. Ollama, vLLM, Groq, LiteLLM)")
-	aiModel         = flag.String("ai-model", "", "AI model to use for AI tasks (default: gpt-4o)")
+	aiProvider      = flag.String("ai-provider", "", "AI provider: openai, anthropic, or acp (default: openai)")
+	aiBaseURL       = flag.String("ai-base-url", "", "Custom base URL for OpenAI-compatible endpoints (ignored with --ai-provider acp)")
+	aiModel         = flag.String("ai-model", "", "AI model to use for AI tasks (default: gpt-4o; ignored with --ai-provider acp)")
 	aiMaxIterations = flag.Int("ai-max-iterations", 0, "Maximum iterations for tool-enabled AI tasks (default: 20)")
-	mcpConfigPath   = flag.String("mcp-config-path", "", "Path to MCP configuration file (default: ~/.cursor/mcp.json)")
+	mcpConfigPath   = flag.String("mcp-config-path", "", "Path to MCP configuration file (default: ~/.cursor/mcp.json; ignored with --ai-provider acp)")
+	acpSocket       = flag.String("acp-socket", "", "Absolute Unix socket path for the ACP agent (required with --ai-provider acp)")
+	acpCWD          = flag.String("acp-cwd", "", "Absolute working directory for ACP sessions (required with --ai-provider acp)")
 	dbPath          = flag.String("db-path", "", "Path to SQLite database for result history (default: ~/.mcp-cron/results.db)")
 	preventSleep    = flag.Bool("prevent-sleep", false, "Prevent system from sleeping while mcp-cron is running (macOS and Windows only)")
 	pollInterval    = flag.Duration("poll-interval", time.Second, "How often to check for due tasks")
@@ -133,6 +135,12 @@ func applyCommandLineFlagsToConfig(cfg *config.Config) {
 	}
 	if *mcpConfigPath != "" {
 		cfg.AI.MCPConfigFilePath = *mcpConfigPath
+	}
+	if *acpSocket != "" {
+		cfg.AI.ACPSocket = *acpSocket
+	}
+	if *acpCWD != "" {
+		cfg.AI.ACPCWD = *acpCWD
 	}
 	if *dbPath != "" {
 		cfg.Store.DBPath = *dbPath

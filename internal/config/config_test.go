@@ -68,6 +68,12 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.AI.MCPConfigFilePath != expectedPath {
 		t.Errorf("Expected default MCP config file path to be '%s', got '%s'", expectedPath, cfg.AI.MCPConfigFilePath)
 	}
+	if cfg.AI.ACPSocket != "" {
+		t.Errorf("Expected default ACP socket path to be empty, got '%s'", cfg.AI.ACPSocket)
+	}
+	if cfg.AI.ACPCWD != "" {
+		t.Errorf("Expected default ACP working directory to be empty, got '%s'", cfg.AI.ACPCWD)
+	}
 }
 
 func TestValidate(t *testing.T) {
@@ -118,6 +124,63 @@ func TestValidate(t *testing.T) {
 	if err := invalidMaxIterations.Validate(); err == nil {
 		t.Error("Expected error for zero max tool iterations, got nil")
 	}
+
+	// Empty provider retains the OpenAI default behavior.
+	emptyProvider := DefaultConfig()
+	emptyProvider.AI.Provider = ""
+	if err := emptyProvider.Validate(); err != nil {
+		t.Errorf("Empty provider should preserve the OpenAI default, got error: %v", err)
+	}
+
+	for _, provider := range []string{ProviderOpenAI, ProviderAnthropic} {
+		cfg := DefaultConfig()
+		cfg.AI.Provider = provider
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Provider %q should be valid, got error: %v", provider, err)
+		}
+	}
+
+	unknownProvider := DefaultConfig()
+	unknownProvider.AI.Provider = "unknown"
+	if err := unknownProvider.Validate(); err == nil {
+		t.Error("Expected error for unknown AI provider, got nil")
+	}
+
+	validACP := DefaultConfig()
+	validACP.AI.Provider = ProviderACP
+	validACP.AI.ACPSocket = "/run/my-agent/acp.sock"
+	validACP.AI.ACPCWD = "/home/chad/project"
+	validACP.AI.APIKey = ""
+	validACP.AI.OpenAIAPIKey = ""
+	validACP.AI.AnthropicAPIKey = ""
+	validACP.AI.Model = "ignored-model"
+	validACP.AI.BaseURL = "ignored-base-url"
+	validACP.AI.MCPConfigFilePath = "ignored-mcp-config"
+	if err := validACP.Validate(); err != nil {
+		t.Errorf("ACP config should not require credentials or validate ignored settings, got error: %v", err)
+	}
+
+	acpPathTests := []struct {
+		name   string
+		socket string
+		cwd    string
+	}{
+		{name: "missing socket", socket: "", cwd: "/home/chad/project"},
+		{name: "relative socket", socket: "run/acp.sock", cwd: "/home/chad/project"},
+		{name: "missing cwd", socket: "/run/my-agent/acp.sock", cwd: ""},
+		{name: "relative cwd", socket: "/run/my-agent/acp.sock", cwd: "project"},
+	}
+	for _, tt := range acpPathTests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.AI.Provider = ProviderACP
+			cfg.AI.ACPSocket = tt.socket
+			cfg.AI.ACPCWD = tt.cwd
+			if err := cfg.Validate(); err == nil {
+				t.Error("Expected ACP path validation error, got nil")
+			}
+		})
+	}
 }
 
 func TestIsResponsesAPICapable(t *testing.T) {
@@ -166,6 +229,8 @@ func TestFromEnv(t *testing.T) {
 		"MCP_CRON_AI_MODEL":                  os.Getenv("MCP_CRON_AI_MODEL"),
 		"MCP_CRON_AI_MAX_TOOL_ITERATIONS":    os.Getenv("MCP_CRON_AI_MAX_TOOL_ITERATIONS"),
 		"MCP_CRON_MCP_CONFIG_FILE_PATH":      os.Getenv("MCP_CRON_MCP_CONFIG_FILE_PATH"),
+		"MCP_CRON_ACP_SOCKET":                os.Getenv("MCP_CRON_ACP_SOCKET"),
+		"MCP_CRON_ACP_CWD":                   os.Getenv("MCP_CRON_ACP_CWD"),
 		"MCP_CRON_STORE_DB_PATH":             os.Getenv("MCP_CRON_STORE_DB_PATH"),
 	}
 
@@ -200,6 +265,8 @@ func TestFromEnv(t *testing.T) {
 	_ = os.Setenv("MCP_CRON_AI_MODEL", "gpt-4-turbo")
 	_ = os.Setenv("MCP_CRON_AI_MAX_TOOL_ITERATIONS", "30")
 	_ = os.Setenv("MCP_CRON_MCP_CONFIG_FILE_PATH", "/tmp/mcp.json")
+	_ = os.Setenv("MCP_CRON_ACP_SOCKET", "/run/test-agent/acp.sock")
+	_ = os.Setenv("MCP_CRON_ACP_CWD", "/tmp/project")
 	_ = os.Setenv("MCP_CRON_STORE_DB_PATH", "/tmp/custom-results.db")
 
 	// Create a new config and apply environment variables
@@ -248,6 +315,12 @@ func TestFromEnv(t *testing.T) {
 	}
 	if cfg.AI.MCPConfigFilePath != "/tmp/mcp.json" {
 		t.Errorf("Expected MCP config file path '/tmp/mcp.json', got '%s'", cfg.AI.MCPConfigFilePath)
+	}
+	if cfg.AI.ACPSocket != "/run/test-agent/acp.sock" {
+		t.Errorf("Expected ACP socket path '/run/test-agent/acp.sock', got '%s'", cfg.AI.ACPSocket)
+	}
+	if cfg.AI.ACPCWD != "/tmp/project" {
+		t.Errorf("Expected ACP working directory '/tmp/project', got '%s'", cfg.AI.ACPCWD)
 	}
 	if cfg.Store.DBPath != "/tmp/custom-results.db" {
 		t.Errorf("Expected store DB path '/tmp/custom-results.db', got '%s'", cfg.Store.DBPath)
