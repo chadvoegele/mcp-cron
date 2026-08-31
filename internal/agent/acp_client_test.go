@@ -11,7 +11,6 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -198,13 +197,29 @@ func TestRunACPTaskLifecycleAndOutput(t *testing.T) {
 			return fmt.Errorf("unexpected prompt request: %#v", promptRequest)
 		}
 
-		if _, err := fmt.Fprintln(conn, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello "}}}}`); err != nil {
+		if err := writeACPUpdate(conn, "session-1", acp.UpdateAgentMessageText("hello ")); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(conn, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"not output"}}}}`); err != nil {
+		if err := writeACPUpdate(conn, "session-1", acp.UpdateAgentThoughtText("not output")); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(conn, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"world"}}}}`); err != nil {
+		if err := writeACPUpdate(conn, "session-1", acp.UpdateAgentMessage(acp.ImageBlock("aW1hZ2U=", "image/png"))); err != nil {
+			return err
+		}
+		if err := writeACPUpdate(conn, "session-1", acp.UpdatePlan(acp.PlanEntry{
+			Content:  "not output",
+			Priority: acp.PlanEntryPriorityLow,
+			Status:   acp.PlanEntryStatusCompleted,
+		})); err != nil {
+			return err
+		}
+		if err := writeACPUpdate(conn, "session-1", acp.StartToolCall("tool-1", "not output", acp.WithStartKind(acp.ToolKindExecute))); err != nil {
+			return err
+		}
+		if err := writeACPUpdate(conn, "session-1", acp.UpdateToolCall("tool-1", acp.WithUpdateTitle("not output"))); err != nil {
+			return err
+		}
+		if err := writeACPUpdate(conn, "session-1", acp.UpdateAgentMessageText("world")); err != nil {
 			return err
 		}
 		return writeACPResponse(conn, request.ID, `{"stopReason":"end_turn"}`)
@@ -246,7 +261,7 @@ func TestRunACPTaskRejectsInitializeResponses(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			socketPath := startACPServer(t, func(conn net.Conn, scanner *bufio.Scanner) error {
+			server := newFakeACPAgent(t, func(conn net.Conn, scanner *bufio.Scanner) error {
 				request, err := readACPRequest(scanner, nil)
 				if err != nil {
 					return err
@@ -254,11 +269,25 @@ func TestRunACPTaskRejectsInitializeResponses(t *testing.T) {
 				if request.Method != "initialize" {
 					return fmt.Errorf("request method = %q, want initialize", request.Method)
 				}
-				return writeACPResponse(conn, request.ID, tt.result)
+				if err := writeACPResponse(conn, request.ID, tt.result); err != nil {
+					return err
+				}
+				for scanner.Scan() {
+					var notification struct {
+						Method string `json:"method"`
+					}
+					if err := json.Unmarshal(scanner.Bytes(), &notification); err != nil {
+						return err
+					}
+					if notification.Method == "authenticate" {
+						return errors.New("client called authenticate after rejecting advertised auth methods")
+					}
+				}
+				return scanner.Err()
 			})
 
 			cfg := config.DefaultConfig()
-			cfg.AI.ACPSocket = socketPath
+			cfg.AI.ACPSocket = server.socketPath()
 			cfg.AI.ACPCWD = "/workspace"
 			_, err := RunACPTask(context.Background(), "prompt", cfg)
 			if !errors.Is(err, tt.want) {
@@ -267,6 +296,212 @@ func TestRunACPTaskRejectsInitializeResponses(t *testing.T) {
 			if !strings.Contains(err.Error(), tt.wantInText) {
 				t.Fatalf("error = %q, want it to contain %q", err, tt.wantInText)
 			}
+			server.waitForDisconnect(t)
+		})
+	}
+}
+
+func TestRunACPTaskStopReasonsOverUnixSocket(t *testing.T) {
+	tests := []struct {
+		name       string
+		reason     acp.StopReason
+		wantErr    bool
+		wantInText string
+	}{
+		{name: "end turn", reason: acp.StopReasonEndTurn},
+		{name: "max tokens", reason: acp.StopReasonMaxTokens, wantErr: true, wantInText: "max_tokens"},
+		{name: "max turn requests", reason: acp.StopReasonMaxTurnRequests, wantErr: true, wantInText: "max_turn_requests"},
+		{name: "refusal", reason: acp.StopReasonRefusal, wantErr: true, wantInText: "refusal"},
+		{name: "cancelled", reason: acp.StopReasonCancelled, wantErr: true, wantInText: "cancelled"},
+		{name: "unknown", reason: acp.StopReason("future_reason"), wantErr: true, wantInText: "unknown stop reason"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newFakeACPAgent(t, func(conn net.Conn, scanner *bufio.Scanner) error {
+				request, err := readACPRequest(scanner, nil)
+				if err != nil {
+					return err
+				}
+				if err := writeACPResponse(conn, request.ID, `{"protocolVersion":1,"authMethods":[]}`); err != nil {
+					return err
+				}
+				request, err = readACPRequest(scanner, nil)
+				if err != nil {
+					return err
+				}
+				if err := writeACPResponse(conn, request.ID, `{"sessionId":"stop-reason"}`); err != nil {
+					return err
+				}
+				request, err = readACPRequest(scanner, nil)
+				if err != nil {
+					return err
+				}
+				if err := writeACPUpdate(conn, "stop-reason", acp.UpdateAgentMessageText("partial output")); err != nil {
+					return err
+				}
+				return writeACPResponse(conn, request.ID, fmt.Sprintf(`{"stopReason":%q}`, tt.reason))
+			})
+
+			cfg := config.DefaultConfig()
+			cfg.AI.ACPSocket = server.socketPath()
+			cfg.AI.ACPCWD = "/workspace"
+			output, err := RunACPTask(context.Background(), "prompt", cfg)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr = %t", err, tt.wantErr)
+			}
+			if output != "partial output" {
+				t.Fatalf("output = %q, want partial output", output)
+			}
+			if tt.wantInText != "" && !strings.Contains(err.Error(), tt.wantInText) {
+				t.Fatalf("error = %q, want it to contain %q", err, tt.wantInText)
+			}
+			server.waitForDisconnect(t)
+		})
+	}
+}
+
+func TestRunACPTaskRequestFailuresCloseUnixSocket(t *testing.T) {
+	tests := []struct {
+		name  string
+		stage string
+	}{
+		{name: "initialize", stage: "initialize"},
+		{name: "session new", stage: "session/new"},
+		{name: "prompt", stage: "session/prompt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newFakeACPAgent(t, func(conn net.Conn, scanner *bufio.Scanner) error {
+				request, err := readACPRequest(scanner, nil)
+				if err != nil {
+					return err
+				}
+				if request.Method != "initialize" {
+					return fmt.Errorf("first request method = %q, want initialize", request.Method)
+				}
+				if tt.stage == "initialize" {
+					if err := writeACPError(conn, request.ID, -32001, "fake initialize failure"); err != nil {
+						return err
+					}
+					return waitForClientClose(scanner)
+				}
+				if err := writeACPResponse(conn, request.ID, `{"protocolVersion":1,"authMethods":[]}`); err != nil {
+					return err
+				}
+
+				request, err = readACPRequest(scanner, nil)
+				if err != nil {
+					return err
+				}
+				if request.Method != "session/new" {
+					return fmt.Errorf("second request method = %q, want session/new", request.Method)
+				}
+				if tt.stage == "session/new" {
+					if err := writeACPError(conn, request.ID, -32002, "fake session failure"); err != nil {
+						return err
+					}
+					return waitForClientClose(scanner)
+				}
+				if err := writeACPResponse(conn, request.ID, `{"sessionId":"request-failure"}`); err != nil {
+					return err
+				}
+
+				request, err = readACPRequest(scanner, nil)
+				if err != nil {
+					return err
+				}
+				if request.Method != "session/prompt" {
+					return fmt.Errorf("third request method = %q, want session/prompt", request.Method)
+				}
+				if err := writeACPError(conn, request.ID, -32003, "fake prompt failure"); err != nil {
+					return err
+				}
+				return waitForClientClose(scanner)
+			})
+
+			cfg := config.DefaultConfig()
+			cfg.AI.ACPSocket = server.socketPath()
+			cfg.AI.ACPCWD = "/workspace"
+			output, err := RunACPTask(context.Background(), "prompt", cfg)
+			if err == nil {
+				t.Fatal("RunACPTask returned nil error for a failed ACP request")
+			}
+			if output != "" {
+				t.Fatalf("output = %q, want empty output", output)
+			}
+			if !strings.Contains(err.Error(), "fake ") {
+				t.Fatalf("error = %q, want fake request diagnostic", err)
+			}
+			server.waitForDisconnect(t)
+		})
+	}
+}
+
+func TestRunACPTaskCancellationBeforeSessionClosesUnixSocket(t *testing.T) {
+	tests := []struct {
+		name  string
+		stage string
+	}{
+		{name: "initialize", stage: "initialize"},
+		{name: "session new", stage: "session/new"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requestReceived := make(chan struct{})
+			server := newFakeACPAgent(t, func(conn net.Conn, scanner *bufio.Scanner) error {
+				request, err := readACPRequest(scanner, nil)
+				if err != nil {
+					return err
+				}
+				if request.Method != "initialize" {
+					return fmt.Errorf("first request method = %q, want initialize", request.Method)
+				}
+				if tt.stage == "initialize" {
+					close(requestReceived)
+					return waitForClientCloseWithoutSessionCancel(scanner)
+				}
+				if err := writeACPResponse(conn, request.ID, `{"protocolVersion":1,"authMethods":[]}`); err != nil {
+					return err
+				}
+				request, err = readACPRequest(scanner, nil)
+				if err != nil {
+					return err
+				}
+				if request.Method != "session/new" {
+					return fmt.Errorf("second request method = %q, want session/new", request.Method)
+				}
+				close(requestReceived)
+				return waitForClientCloseWithoutSessionCancel(scanner)
+			})
+
+			cfg := config.DefaultConfig()
+			cfg.AI.ACPSocket = server.socketPath()
+			cfg.AI.ACPCWD = "/workspace"
+			ctx, cancel := context.WithCancel(context.Background())
+			resultCh := make(chan error, 1)
+			go func() {
+				_, err := RunACPTask(ctx, "cancel before session", cfg)
+				resultCh <- err
+			}()
+
+			select {
+			case <-requestReceived:
+				cancel()
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for ACP request")
+			}
+			select {
+			case err := <-resultCh:
+				if err == nil {
+					t.Fatal("RunACPTask returned nil error after cancellation")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for RunACPTask after cancellation")
+			}
+			server.waitForDisconnect(t)
 		})
 	}
 }
@@ -417,68 +652,4 @@ func readACPRequest(scanner *bufio.Scanner, params any) (acpRPCRequest, error) {
 		}
 	}
 	return request, nil
-}
-
-func writeACPResponse(conn net.Conn, id json.RawMessage, result string) error {
-	if len(id) == 0 {
-		return errors.New("ACP request has no ID")
-	}
-	_, err := fmt.Fprintf(conn, `{"jsonrpc":"2.0","id":%s,"result":%s}`+"\n", id, result)
-	return err
-}
-
-func startACPServer(t *testing.T, handler func(net.Conn, *bufio.Scanner) error) string {
-	t.Helper()
-
-	socketPath := filepath.Join(t.TempDir(), "agent.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("listen on ACP socket: %v", err)
-	}
-
-	var mu sync.Mutex
-	var active net.Conn
-	done := make(chan error, 1)
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			done <- err
-			return
-		}
-		mu.Lock()
-		active = conn
-		mu.Unlock()
-		defer func() {
-			_ = conn.Close()
-			mu.Lock()
-			active = nil
-			mu.Unlock()
-		}()
-		handlerErr := handler(conn, bufio.NewScanner(conn))
-		if handlerErr == nil {
-			// Keep the peer open until the client closes its socket. The ACP SDK
-			// waits for notifications sent before a response to be processed.
-			_, _ = io.Copy(io.Discard, conn)
-		}
-		done <- handlerErr
-	}()
-
-	t.Cleanup(func() {
-		_ = listener.Close()
-		mu.Lock()
-		if active != nil {
-			_ = active.Close()
-		}
-		mu.Unlock()
-		select {
-		case err := <-done:
-			if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
-				t.Errorf("ACP test server: %v", err)
-			}
-		case <-time.After(time.Second):
-			t.Error("timed out waiting for ACP test server")
-		}
-	})
-
-	return socketPath
 }
