@@ -84,10 +84,13 @@ func RunACPTask(ctx context.Context, prompt string, cfg *config.Config) (string,
 		return client.output(), errors.New("ACP session/new returned an empty session ID")
 	}
 
+	client.setSessionID(session.SessionId)
+	client.setPromptActive(true)
 	response, err := connection.Prompt(ctx, acp.PromptRequest{
 		SessionId: session.SessionId,
 		Prompt:    []acp.ContentBlock{acp.TextBlock(prompt)},
 	})
+	client.setPromptActive(false)
 	if err != nil && acpContextExpired(ctx) {
 		cancelACPSession(stopSocketWatcher, socket, connection, session.SessionId)
 	}
@@ -181,8 +184,10 @@ func acpStopReasonError(reason acp.StopReason) error {
 // are intentionally not advertised, so these callbacks are defensive
 // rejection paths for agents that request unsupported operations anyway.
 type acpClient struct {
-	mu   sync.Mutex
-	text strings.Builder
+	mu           sync.Mutex
+	sessionID    acp.SessionId
+	activePrompt bool
+	text         strings.Builder
 }
 
 var _ acp.Client = (*acpClient)(nil)
@@ -193,9 +198,24 @@ func (c *acpClient) SessionUpdate(_ context.Context, params acp.SessionNotificat
 	}
 
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.activePrompt || params.SessionId != c.sessionID {
+		return nil
+	}
 	c.text.WriteString(params.Update.AgentMessageChunk.Content.Text.Text)
-	c.mu.Unlock()
 	return nil
+}
+
+func (c *acpClient) setSessionID(sessionID acp.SessionId) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sessionID = sessionID
+}
+
+func (c *acpClient) setPromptActive(active bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.activePrompt = active
 }
 
 func (c *acpClient) outputTextFileOperation(operation string) error {

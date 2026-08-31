@@ -20,6 +20,8 @@ import (
 
 func TestACPClientCollectsOnlyTextAgentMessageChunks(t *testing.T) {
 	client := &acpClient{}
+	client.setSessionID("session-1")
+	client.setPromptActive(true)
 
 	updates := []acp.SessionUpdate{
 		acp.UpdateAgentMessageText("first "),
@@ -28,12 +30,45 @@ func TestACPClientCollectsOnlyTextAgentMessageChunks(t *testing.T) {
 		acp.UpdateAgentMessageText("second"),
 	}
 	for _, update := range updates {
-		if err := client.SessionUpdate(context.Background(), acp.SessionNotification{Update: update}); err != nil {
+		if err := client.SessionUpdate(context.Background(), acp.SessionNotification{SessionId: "session-1", Update: update}); err != nil {
 			t.Fatalf("SessionUpdate returned error: %v", err)
 		}
 	}
 
 	if got, want := client.output(), "first second"; got != want {
+		t.Fatalf("collected output = %q, want %q", got, want)
+	}
+}
+
+func TestACPClientScopesOutputToActiveSessionPrompt(t *testing.T) {
+	client := &acpClient{}
+	client.setSessionID("session-1")
+
+	updates := []struct {
+		name      string
+		sessionID acp.SessionId
+		active    bool
+		text      string
+	}{
+		{name: "before prompt", sessionID: "session-1", text: "before"},
+		{name: "other session", sessionID: "session-2", active: true, text: "other"},
+		{name: "active prompt", sessionID: "session-1", active: true, text: "during"},
+		{name: "after prompt", sessionID: "session-1", text: "after"},
+	}
+
+	for _, update := range updates {
+		t.Run(update.name, func(t *testing.T) {
+			client.setPromptActive(update.active)
+			if err := client.SessionUpdate(context.Background(), acp.SessionNotification{
+				SessionId: update.sessionID,
+				Update:    acp.UpdateAgentMessageText(update.text),
+			}); err != nil {
+				t.Fatalf("SessionUpdate returned error: %v", err)
+			}
+		})
+	}
+
+	if got, want := client.output(), "during"; got != want {
 		t.Fatalf("collected output = %q, want %q", got, want)
 	}
 }
