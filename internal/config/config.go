@@ -21,6 +21,13 @@ const (
 	TransportStdio = "stdio"
 )
 
+// AI provider names.
+const (
+	ProviderOpenAI    = "openai"
+	ProviderAnthropic = "anthropic"
+	ProviderACP       = "acp"
+)
+
 // responsesAPIHosts and responsesAPIHostSuffixes identify servers known to
 // support the OpenAI Responses API. All other custom base URLs default to the
 // Chat Completions API, which is the universally supported format across
@@ -128,11 +135,12 @@ type StoreConfig struct {
 
 // AIConfig holds AI-specific configuration
 type AIConfig struct {
-	// Provider selects the LLM backend: "openai" (default) or "anthropic"
+	// Provider selects the LLM backend: "openai" (default), "anthropic", or "acp".
 	Provider string
 
 	// BaseURL overrides the API endpoint for OpenAI-compatible providers
 	// (e.g. Ollama, vLLM, Groq). Empty means use the default.
+	// Ignored when Provider is ProviderACP.
 	BaseURL string
 
 	// APIKey is a generic fallback API key used when the provider-specific
@@ -147,13 +155,21 @@ type AIConfig struct {
 	AnthropicAPIKey string
 
 	// LLM model to use for AI tasks
+	// Ignored when Provider is ProviderACP.
 	Model string
 
 	// Maximum iterations for tool-enabled tasks
 	MaxToolIterations int
 
 	// File path for the MCP configuration
+	// Ignored when Provider is ProviderACP.
 	MCPConfigFilePath string
+
+	// ACPSocket is the Unix socket path for the ACP agent.
+	ACPSocket string
+
+	// ACPCWD is the working directory to use for ACP sessions.
+	ACPCWD string
 }
 
 // DefaultConfig returns the default configuration
@@ -181,14 +197,16 @@ func DefaultConfig() *Config {
 			DBPath: filepath.Join(home, ".mcp-cron", "results.db"),
 		},
 		AI: AIConfig{
-			Provider:        "openai",
-			BaseURL:         "",
-			APIKey:          "",
-			OpenAIAPIKey:    "",
-			AnthropicAPIKey: "",
-			Model:           "gpt-4o",
+			Provider:          ProviderOpenAI,
+			BaseURL:           "",
+			APIKey:            "",
+			OpenAIAPIKey:      "",
+			AnthropicAPIKey:   "",
+			Model:             "gpt-4o",
 			MaxToolIterations: 20,
 			MCPConfigFilePath: filepath.Join(home, ".cursor", "mcp.json"),
+			ACPSocket:         "",
+			ACPCWD:            "",
 		},
 	}
 }
@@ -218,6 +236,26 @@ func (c *Config) Validate() error {
 	}
 
 	// Validate AI config
+	switch provider := strings.ToLower(c.AI.Provider); provider {
+	case "", ProviderOpenAI, ProviderAnthropic:
+		// Empty provider preserves the default OpenAI behavior.
+	case ProviderACP:
+		if strings.TrimSpace(c.AI.ACPSocket) == "" {
+			return fmt.Errorf("ACP socket path is required when provider is %q", ProviderACP)
+		}
+		if !filepath.IsAbs(c.AI.ACPSocket) {
+			return fmt.Errorf("ACP socket path must be absolute: %q", c.AI.ACPSocket)
+		}
+		if strings.TrimSpace(c.AI.ACPCWD) == "" {
+			return fmt.Errorf("ACP working directory is required when provider is %q", ProviderACP)
+		}
+		if !filepath.IsAbs(c.AI.ACPCWD) {
+			return fmt.Errorf("ACP working directory must be absolute: %q", c.AI.ACPCWD)
+		}
+	default:
+		return fmt.Errorf("AI provider must be one of: %s, %s, %s", ProviderOpenAI, ProviderAnthropic, ProviderACP)
+	}
+
 	if c.AI.MaxToolIterations < 1 {
 		return fmt.Errorf("max tool iterations must be at least 1")
 	}
@@ -310,6 +348,14 @@ func FromEnv(config *Config) {
 
 	if val := os.Getenv("MCP_CRON_MCP_CONFIG_FILE_PATH"); val != "" {
 		config.AI.MCPConfigFilePath = val
+	}
+
+	if val := os.Getenv("MCP_CRON_ACP_SOCKET"); val != "" {
+		config.AI.ACPSocket = val
+	}
+
+	if val := os.Getenv("MCP_CRON_ACP_CWD"); val != "" {
+		config.AI.ACPCWD = val
 	}
 
 	if val := os.Getenv("MCP_CRON_PREVENT_SLEEP"); val != "" {
