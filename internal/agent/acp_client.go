@@ -14,7 +14,10 @@ import (
 	"github.com/jolks/mcp-cron/internal/config"
 )
 
-const acpConnectionTimeout = 10 * time.Second
+const (
+	acpConnectionTimeout = 10 * time.Second
+	acpCancelWriteGrace  = 250 * time.Millisecond
+)
 
 var (
 	// ErrACPUnsupportedOperation identifies a client callback that mcp-cron does
@@ -42,7 +45,16 @@ func RunACPTask(ctx context.Context, prompt string, cfg *config.Config) (string,
 	if err != nil {
 		return "", fmt.Errorf("connect to ACP socket %q: %w", cfg.AI.ACPSocket, err)
 	}
-	defer func() { _ = socket.Close() }()
+
+	stopSocketWatcher, err := watchACPContext(ctx, socket)
+	if err != nil {
+		_ = socket.Close()
+		return "", fmt.Errorf("configure ACP socket deadlines: %w", err)
+	}
+	defer func() {
+		stopSocketWatcher()
+		_ = socket.Close()
+	}()
 
 	client := &acpClient{}
 	connection := acp.NewClientSideConnection(client, socket, socket)
@@ -76,6 +88,9 @@ func RunACPTask(ctx context.Context, prompt string, cfg *config.Config) (string,
 		SessionId: session.SessionId,
 		Prompt:    []acp.ContentBlock{acp.TextBlock(prompt)},
 	})
+	if err != nil && acpContextExpired(ctx) {
+		cancelACPSession(stopSocketWatcher, socket, connection, session.SessionId)
+	}
 	output := client.output()
 	if err != nil {
 		return output, fmt.Errorf("ACP session/prompt: %w", err)
@@ -85,6 +100,63 @@ func RunACPTask(ctx context.Context, prompt string, cfg *config.Config) (string,
 	}
 
 	return output, nil
+}
+
+// watchACPContext applies the context deadline to socket I/O and makes
+// cancellation wake both reads and writes. The returned function stops and
+// joins the watcher so it cannot overwrite a later deadline during cleanup.
+func watchACPContext(ctx context.Context, socket net.Conn) (func(), error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := socket.SetDeadline(deadline); err != nil {
+			return nil, err
+		}
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var stopOnce sync.Once
+	go func() {
+		defer close(done)
+		select {
+		case <-ctx.Done():
+			_ = socket.SetDeadline(time.Now())
+		case <-stop:
+		}
+	}()
+
+	return func() {
+		stopOnce.Do(func() { close(stop) })
+		<-done
+	}, nil
+}
+
+func acpContextExpired(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	return ok && !time.Now().Before(deadline)
+}
+
+// cancelACPSession preserves the expired read deadline while allowing one
+// short, bounded attempt to send the required session/cancel notification.
+func cancelACPSession(
+	stopSocketWatcher func(),
+	socket net.Conn,
+	connection *acp.ClientSideConnection,
+	sessionID acp.SessionId,
+) {
+	stopSocketWatcher()
+
+	now := time.Now()
+	_ = socket.SetReadDeadline(now)
+	if err := socket.SetWriteDeadline(now.Add(acpCancelWriteGrace)); err != nil {
+		return
+	}
+
+	cancelCtx, cancel := context.WithTimeout(context.Background(), acpCancelWriteGrace)
+	defer cancel()
+	_ = connection.Cancel(cancelCtx, acp.CancelNotification{SessionId: sessionID})
 }
 
 // acpStopReasonError maps the ACP prompt stop reason to task success or

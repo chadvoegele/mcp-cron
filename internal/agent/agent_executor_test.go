@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -303,6 +304,94 @@ func TestExecuteAgentTaskACPTimeoutPersistsPartialOutput(t *testing.T) {
 	}
 	if persisted == nil || persisted.Output != "before timeout" || persisted.ExitCode != 1 || persisted.Error == "" {
 		t.Fatalf("persisted result = %#v, want failed result with partial output", persisted)
+	}
+}
+
+func TestExecuteAgentTaskACPBlockedPromptWritePersistsFailure(t *testing.T) {
+	const timeout = 100 * time.Millisecond
+
+	promptReady := make(chan struct{})
+	releaseServer := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseServer) }) }
+
+	server := newFakeACPAgent(t, func(conn net.Conn, scanner *bufio.Scanner) error {
+		request, err := readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if request.Method != "initialize" {
+			return fmt.Errorf("first request method = %q, want initialize", request.Method)
+		}
+		if err := writeACPResponse(conn, request.ID, `{"protocolVersion":1,"authMethods":[]}`); err != nil {
+			return err
+		}
+
+		request, err = readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if request.Method != "session/new" {
+			return fmt.Errorf("second request method = %q, want session/new", request.Method)
+		}
+		if err := writeACPResponse(conn, request.ID, `{"sessionId":"blocked-write"}`); err != nil {
+			return err
+		}
+
+		// Do not read session/prompt. A sufficiently large request must block in
+		// the client's socket write until the task context expires.
+		close(promptReady)
+		<-releaseServer
+		return nil
+	})
+	t.Cleanup(release)
+
+	store := newMockResultStore()
+	cfg := config.DefaultConfig()
+	cfg.AI.Provider = config.ProviderACP
+	cfg.AI.ACPSocket = server.socketPath()
+	cfg.AI.ACPCWD = "/workspace"
+	executor := NewAgentExecutor(cfg, store, testLogger())
+
+	prompt := strings.Repeat("x", 1<<20)
+	resultCh := make(chan *model.Result, 1)
+	go func() {
+		resultCh <- executor.ExecuteAgentTask(context.Background(), "acp-blocked-write", prompt, timeout)
+	}()
+
+	select {
+	case <-promptReady:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for session/new")
+	}
+	promptStarted := time.Now()
+
+	var result *model.Result
+	select {
+	case result = <-resultCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ExecuteAgentTask blocked on a full ACP socket write")
+	}
+	release()
+	server.waitForDisconnect(t)
+
+	maxDuration := timeout + acpCancelWriteGrace + 500*time.Millisecond
+	if elapsed := time.Since(promptStarted); elapsed > maxDuration {
+		t.Fatalf("ExecuteAgentTask took %s after the prompt write started, want at most %s", elapsed, maxDuration)
+	}
+	if result.Error == "" {
+		t.Fatal("Error is empty, want timeout/cancellation diagnostic")
+	}
+	if result.ExitCode != 1 {
+		t.Fatalf("ExitCode = %d, want 1", result.ExitCode)
+	}
+
+	persisted, err := store.GetLatestResult("acp-blocked-write")
+	if err != nil {
+		t.Fatalf("GetLatestResult returned error: %v", err)
+	}
+	if persisted == nil || persisted.ExitCode != 1 || persisted.Error == "" {
+		t.Fatalf("persisted result = %#v, want failed result", persisted)
 	}
 }
 
