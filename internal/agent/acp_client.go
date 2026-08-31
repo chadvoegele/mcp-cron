@@ -23,9 +23,6 @@ var (
 	// ErrACPUnsupportedOperation identifies a client callback that mcp-cron does
 	// not implement for ACP sessions.
 	ErrACPUnsupportedOperation = errors.New("ACP operation is unsupported")
-	// ErrACPAuthenticationUnsupported identifies an agent that requires an
-	// authentication flow mcp-cron intentionally does not provide.
-	ErrACPAuthenticationUnsupported = errors.New("ACP authentication is unsupported")
 	// ErrACPProtocolVersion identifies an agent that did not negotiate ACP v1.
 	ErrACPProtocolVersion = errors.New("ACP protocol version 1 was not negotiated")
 )
@@ -65,9 +62,6 @@ func RunACPTask(ctx context.Context, prompt string, cfg *config.Config) (string,
 	})
 	if err != nil {
 		return client.output(), fmt.Errorf("ACP initialize: %w", err)
-	}
-	if len(initResponse.AuthMethods) != 0 {
-		return client.output(), fmt.Errorf("%w: agent advertised %d authentication method(s)", ErrACPAuthenticationUnsupported, len(initResponse.AuthMethods))
 	}
 	if initResponse.ProtocolVersion != acp.ProtocolVersionNumber {
 		return client.output(), fmt.Errorf("%w: agent negotiated version %d", ErrACPProtocolVersion, initResponse.ProtocolVersion)

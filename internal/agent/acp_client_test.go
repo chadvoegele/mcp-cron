@@ -286,12 +286,6 @@ func TestRunACPTaskRejectsInitializeResponses(t *testing.T) {
 			want:       ErrACPProtocolVersion,
 			wantInText: "version 2",
 		},
-		{
-			name:       "authentication methods",
-			result:     `{"protocolVersion":1,"authMethods":[{}]}`,
-			want:       ErrACPAuthenticationUnsupported,
-			wantInText: "authentication method",
-		},
 	}
 
 	for _, tt := range tests {
@@ -314,9 +308,6 @@ func TestRunACPTaskRejectsInitializeResponses(t *testing.T) {
 					if err := json.Unmarshal(scanner.Bytes(), &notification); err != nil {
 						return err
 					}
-					if notification.Method == "authenticate" {
-						return errors.New("client called authenticate after rejecting advertised auth methods")
-					}
 				}
 				return scanner.Err()
 			})
@@ -334,6 +325,95 @@ func TestRunACPTaskRejectsInitializeResponses(t *testing.T) {
 			server.waitForDisconnect(t)
 		})
 	}
+}
+
+func TestRunACPTaskAcceptsOptionalTerminalAuthenticationMethod(t *testing.T) {
+	server := newFakeACPAgent(t, func(conn net.Conn, scanner *bufio.Scanner) error {
+		request, err := readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if request.Method != "initialize" {
+			return fmt.Errorf("first request method = %q, want initialize", request.Method)
+		}
+		if err := writeACPResponse(conn, request.ID, `{"protocolVersion":1,"authMethods":[{"id":"pi_terminal_login","name":"Launch pi in the terminal","description":"Start pi in an interactive terminal to configure API keys or login","type":"terminal","args":["--terminal-login"],"env":{}}]}`); err != nil {
+			return err
+		}
+
+		request, err = readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if request.Method == "authenticate" {
+			return errors.New("client called authenticate for an optional authentication method")
+		}
+		if request.Method != "session/new" {
+			return fmt.Errorf("second request method = %q, want session/new", request.Method)
+		}
+		if err := writeACPResponse(conn, request.ID, `{"sessionId":"optional-auth"}`); err != nil {
+			return err
+		}
+
+		request, err = readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if request.Method != "session/prompt" {
+			return fmt.Errorf("third request method = %q, want session/prompt", request.Method)
+		}
+		if err := writeACPUpdate(conn, "optional-auth", acp.UpdateAgentMessageText("pi-acp output")); err != nil {
+			return err
+		}
+		return writeACPResponse(conn, request.ID, `{"stopReason":"end_turn"}`)
+	})
+
+	cfg := config.DefaultConfig()
+	cfg.AI.ACPSocket = server.socketPath()
+	cfg.AI.ACPCWD = "/workspace"
+	output, err := RunACPTask(context.Background(), "prompt", cfg)
+	if err != nil {
+		t.Fatalf("RunACPTask returned error: %v", err)
+	}
+	if output != "pi-acp output" {
+		t.Fatalf("output = %q, want %q", output, "pi-acp output")
+	}
+	server.waitForDisconnect(t)
+}
+
+func TestRunACPTaskReportsLaterAuthenticationRequired(t *testing.T) {
+	server := newFakeACPAgent(t, func(conn net.Conn, scanner *bufio.Scanner) error {
+		request, err := readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if err := writeACPResponse(conn, request.ID, `{"protocolVersion":1,"authMethods":[{"id":"pi_terminal_login","name":"Launch pi in the terminal","type":"terminal","args":["--terminal-login"],"env":{}}]}`); err != nil {
+			return err
+		}
+
+		request, err = readACPRequest(scanner, nil)
+		if err != nil {
+			return err
+		}
+		if request.Method != "session/new" {
+			return fmt.Errorf("request method = %q, want session/new", request.Method)
+		}
+		if err := writeACPError(conn, request.ID, -32000, "Authentication required"); err != nil {
+			return err
+		}
+		return waitForClientClose(scanner)
+	})
+
+	cfg := config.DefaultConfig()
+	cfg.AI.ACPSocket = server.socketPath()
+	cfg.AI.ACPCWD = "/workspace"
+	_, err := RunACPTask(context.Background(), "prompt", cfg)
+	if err == nil {
+		t.Fatal("RunACPTask returned nil error for an auth-required response")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "authentication required") {
+		t.Fatalf("error = %q, want authentication-required diagnostic", err)
+	}
+	server.waitForDisconnect(t)
 }
 
 func TestRunACPTaskStopReasonsOverUnixSocket(t *testing.T) {
