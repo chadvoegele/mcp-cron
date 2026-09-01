@@ -636,15 +636,15 @@ func TestPersistenceRoundTrip(t *testing.T) {
 		UpdatedAt:   now,
 	}
 	aiTask := &model.Task{
-		ID:          "persist-ai",
-		Name:        "AI Task",
-		Type:        model.TypeAI,
-		Prompt:      "Summarize the news",
-		Schedule:    "0 9 * * *",
-		Enabled:     false,
-		Status:      model.StatusPending,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:        "persist-ai",
+		Name:      "AI Task",
+		Type:      model.TypeAI,
+		Prompt:    "Summarize the news",
+		Schedule:  "0 9 * * *",
+		Enabled:   false,
+		Status:    model.StatusPending,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 
 	if err := s1.AddTask(shellTask); err != nil {
@@ -1381,5 +1381,306 @@ func TestOnDemandTaskPollExecution(t *testing.T) {
 	}
 	if !tasks[0].NextRun.IsZero() {
 		t.Error("expected on-demand task to have zero NextRun after execution")
+	}
+}
+
+func TestLoadTasksRepairsArmedOneShot(t *testing.T) {
+	taskStore := newTestStoreForScheduler(t)
+	s := NewScheduler(createTestConfig(), testLogger())
+	s.SetTaskStore(taskStore)
+
+	runAt := time.Now().UTC().Add(time.Hour)
+	if err := taskStore.SaveTask(&model.Task{
+		ID: "repair-one-shot", Name: "Repair One-Shot", Type: model.TypeShellCommand,
+		Command: "echo repair", RunAt: &runAt, Enabled: true,
+	}); err != nil {
+		t.Fatalf("SaveTask: %v", err)
+	}
+
+	if err := s.LoadTasks(); err != nil {
+		t.Fatalf("LoadTasks: %v", err)
+	}
+	loaded, err := s.GetTask("repair-one-shot")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if loaded.RunAt == nil || !loaded.RunAt.Equal(runAt) {
+		t.Fatalf("RunAt = %v, want %v", loaded.RunAt, runAt)
+	}
+	if !loaded.NextRun.Equal(runAt) {
+		t.Fatalf("NextRun = %v, want %v", loaded.NextRun, runAt)
+	}
+
+	persisted, err := taskStore.LoadTasks()
+	if err != nil {
+		t.Fatalf("LoadTasks from store: %v", err)
+	}
+	if len(persisted) != 1 || !persisted[0].NextRun.Equal(runAt) {
+		t.Fatalf("persisted one-shot = %#v, want next_run %v", persisted, runAt)
+	}
+}
+
+func TestOneShotPollClaimsBeforeExecution(t *testing.T) {
+	taskStore := newTestStoreForScheduler(t)
+	var executionCount atomic.Int32
+	executionStarted := make(chan struct{})
+	executionFinished := make(chan struct{})
+	var executionOnce sync.Once
+	stateErr := make(chan error, 1)
+
+	s := NewScheduler(createTestConfig(), testLogger())
+	s.SetTaskStore(taskStore)
+	s.SetTaskExecutor(&MockTaskExecutor{
+		ExecuteFunc: func(_ context.Context, snapshot *model.Task, _ time.Duration) error {
+			if executionCount.Add(1) == 1 {
+				memTask, err := s.GetTask(snapshot.ID)
+				if err != nil {
+					stateErr <- err
+				} else if memTask.Enabled || memTask.RunAt != nil || !memTask.NextRun.IsZero() {
+					stateErr <- fmt.Errorf("claimed task still armed: %+v", memTask)
+				} else {
+					stateErr <- nil
+				}
+				close(executionStarted)
+			}
+			executionOnce.Do(func() { close(executionFinished) })
+			return nil
+		},
+	})
+
+	runAt := time.Now().UTC().Add(-time.Second)
+	if err := s.AddTask(&model.Task{
+		ID: "claim-before-execution", Name: "Claim Before Execution", Type: model.TypeShellCommand,
+		Command: "echo claim", RunAt: &runAt, Enabled: true,
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+
+	s.pollTick()
+	select {
+	case <-executionStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("one-shot executor did not start")
+	}
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-executionFinished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("one-shot executor did not finish")
+	}
+	if err := <-stateErr; err != nil {
+		t.Fatal(err)
+	}
+	if got := executionCount.Load(); got != 1 {
+		t.Fatalf("execution count = %d, want 1", got)
+	}
+
+	loaded, err := taskStore.LoadTasks()
+	if err != nil {
+		t.Fatalf("LoadTasks: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("loaded tasks = %d, want 1", len(loaded))
+	}
+	if loaded[0].Enabled || loaded[0].RunAt != nil || !loaded[0].NextRun.IsZero() {
+		t.Fatalf("consumed task persisted as armed: %+v", loaded[0])
+	}
+	if got, err := s.GetTask("claim-before-execution"); err != nil {
+		t.Fatalf("GetTask: %v", err)
+	} else if got.Status != model.StatusCompleted {
+		t.Fatalf("status = %s, want %s", got.Status, model.StatusCompleted)
+	}
+}
+
+func TestOneShotFailureIsConsumedWithoutRetry(t *testing.T) {
+	taskStore := newTestStoreForScheduler(t)
+	var executionCount atomic.Int32
+
+	s := NewScheduler(createTestConfig(), testLogger())
+	s.SetTaskStore(taskStore)
+	s.SetTaskExecutor(&MockTaskExecutor{
+		ExecuteFunc: func(context.Context, *model.Task, time.Duration) error {
+			executionCount.Add(1)
+			return fmt.Errorf("expected one-shot failure")
+		},
+	})
+
+	runAt := time.Now().UTC().Add(-time.Second)
+	if err := s.AddTask(&model.Task{
+		ID: "failed-one-shot", Name: "Failed One-Shot", Type: model.TypeShellCommand,
+		Command: "false", RunAt: &runAt, Enabled: true,
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+
+	s.pollTick()
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	s.pollTick()
+	if got := executionCount.Load(); got != 1 {
+		t.Fatalf("execution count after a second poll = %d, want 1", got)
+	}
+	if got, err := s.GetTask("failed-one-shot"); err != nil {
+		t.Fatalf("GetTask: %v", err)
+	} else if got.Status != model.StatusFailed {
+		t.Fatalf("status = %s, want %s", got.Status, model.StatusFailed)
+	}
+}
+
+func TestOneShotClaimSurvivesRestart(t *testing.T) {
+	taskStore := newTestStoreForScheduler(t)
+	var executionCount atomic.Int32
+
+	runAt := time.Now().UTC().Add(-time.Second)
+	s1 := NewScheduler(createTestConfig(), testLogger())
+	s1.SetTaskStore(taskStore)
+	s1.SetTaskExecutor(&MockTaskExecutor{
+		ExecuteFunc: func(context.Context, *model.Task, time.Duration) error {
+			executionCount.Add(1)
+			return nil
+		},
+	})
+	if err := s1.AddTask(&model.Task{
+		ID: "restart-one-shot", Name: "Restart One-Shot", Type: model.TypeShellCommand,
+		Command: "echo restart", RunAt: &runAt, Enabled: true,
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	s1.pollTick()
+	if err := s1.Stop(); err != nil {
+		t.Fatalf("Stop first scheduler: %v", err)
+	}
+
+	s2 := NewScheduler(createTestConfig(), testLogger())
+	s2.SetTaskStore(taskStore)
+	s2.SetTaskExecutor(&MockTaskExecutor{
+		ExecuteFunc: func(context.Context, *model.Task, time.Duration) error {
+			executionCount.Add(1)
+			return nil
+		},
+	})
+	if err := s2.LoadTasks(); err != nil {
+		t.Fatalf("LoadTasks after restart: %v", err)
+	}
+	s2.pollTick()
+	if err := s2.Stop(); err != nil {
+		t.Fatalf("Stop second scheduler: %v", err)
+	}
+	if got := executionCount.Load(); got != 1 {
+		t.Fatalf("execution count across restart = %d, want 1", got)
+	}
+	loaded, err := taskStore.LoadTasks()
+	if err != nil {
+		t.Fatalf("LoadTasks from store: %v", err)
+	}
+	if loaded[0].Enabled || loaded[0].RunAt != nil || !loaded[0].NextRun.IsZero() {
+		t.Fatalf("claimed task was re-armed after restart: %+v", loaded[0])
+	}
+}
+
+func TestRunTaskNowConsumesArmedOneShot(t *testing.T) {
+	taskStore := newTestStoreForScheduler(t)
+	var executionCount atomic.Int32
+
+	s := NewScheduler(createTestConfig(), testLogger())
+	s.SetTaskStore(taskStore)
+	s.SetTaskExecutor(&MockTaskExecutor{
+		ExecuteFunc: func(context.Context, *model.Task, time.Duration) error {
+			executionCount.Add(1)
+			return nil
+		},
+	})
+
+	runAt := time.Now().UTC().Add(time.Hour)
+	if err := s.AddTask(&model.Task{
+		ID: "manual-one-shot", Name: "Manual One-Shot", Type: model.TypeShellCommand,
+		Command: "echo manual", RunAt: &runAt, Enabled: true,
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	if err := s.RunTaskNow("manual-one-shot"); err != nil {
+		t.Fatalf("RunTaskNow: %v", err)
+	}
+	armed, err := s.GetTask("manual-one-shot")
+	if err != nil {
+		t.Fatalf("GetTask after RunTaskNow: %v", err)
+	}
+	if armed.RunAt == nil || !armed.RunAt.Equal(runAt) || armed.NextRun.After(time.Now()) {
+		t.Fatalf("RunTaskNow did not arm immediate one-shot: %+v", armed)
+	}
+
+	s.pollTick()
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if got := executionCount.Load(); got != 1 {
+		t.Fatalf("execution count = %d, want 1", got)
+	}
+	loaded, err := taskStore.LoadTasks()
+	if err != nil {
+		t.Fatalf("LoadTasks: %v", err)
+	}
+	if loaded[0].Enabled || loaded[0].RunAt != nil || !loaded[0].NextRun.IsZero() {
+		t.Fatalf("manually consumed task persisted as armed: %+v", loaded[0])
+	}
+}
+
+func TestOneShotPollDeduplicatesAcrossSchedulers(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "one-shot-dedup.db")
+	store1, err := store.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore 1: %v", err)
+	}
+	t.Cleanup(func() { _ = store1.Close() })
+	store2, err := store.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore 2: %v", err)
+	}
+	t.Cleanup(func() { _ = store2.Close() })
+
+	var executionCount atomic.Int32
+	newExecutor := func() *MockTaskExecutor {
+		return &MockTaskExecutor{ExecuteFunc: func(context.Context, *model.Task, time.Duration) error {
+			executionCount.Add(1)
+			return nil
+		}}
+	}
+	s1 := NewScheduler(createTestConfig(), testLogger())
+	s1.SetTaskStore(store1)
+	s1.SetTaskExecutor(newExecutor())
+	s2 := NewScheduler(createTestConfig(), testLogger())
+	s2.SetTaskStore(store2)
+	s2.SetTaskExecutor(newExecutor())
+
+	runAt := time.Now().UTC().Add(-time.Second)
+	if err := s1.AddTask(&model.Task{
+		ID: "shared-one-shot", Name: "Shared One-Shot", Type: model.TypeShellCommand,
+		Command: "echo shared", RunAt: &runAt, Enabled: true,
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	if err := s1.LoadTasks(); err != nil {
+		t.Fatalf("LoadTasks 1: %v", err)
+	}
+	if err := s2.LoadTasks(); err != nil {
+		t.Fatalf("LoadTasks 2: %v", err)
+	}
+
+	var pollWg sync.WaitGroup
+	pollWg.Add(2)
+	go func() { defer pollWg.Done(); s1.pollTick() }()
+	go func() { defer pollWg.Done(); s2.pollTick() }()
+	pollWg.Wait()
+	if err := s1.Stop(); err != nil {
+		t.Fatalf("Stop scheduler 1: %v", err)
+	}
+	if err := s2.Stop(); err != nil {
+		t.Fatalf("Stop scheduler 2: %v", err)
+	}
+	if got := executionCount.Load(); got != 1 {
+		t.Fatalf("execution count = %d, want 1", got)
 	}
 }
