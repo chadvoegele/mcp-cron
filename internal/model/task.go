@@ -35,23 +35,24 @@ const (
 
 // Task represents a scheduled task
 type Task struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	Command     string     `json:"command,omitempty" description:"command for shell"`
-	Prompt      string     `json:"prompt,omitempty" description:"prompt to use for AI"`
-	URL         string     `json:"url,omitempty" description:"URL for HTTP tasks"`
-	Method      string     `json:"method,omitempty" description:"HTTP method for HTTP tasks (default POST)"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Command     string            `json:"command,omitempty" description:"command for shell"`
+	Prompt      string            `json:"prompt,omitempty" description:"prompt to use for AI"`
+	URL         string            `json:"url,omitempty" description:"URL for HTTP tasks"`
+	Method      string            `json:"method,omitempty" description:"HTTP method for HTTP tasks (default POST)"`
 	Headers     map[string]string `json:"headers,omitempty" description:"HTTP request headers for HTTP tasks"`
-	Body        string     `json:"body,omitempty" description:"HTTP request body for HTTP tasks"`
-	Schedule    string     `json:"schedule"`
-	Enabled     bool       `json:"enabled"`
-	Type        TaskType   `json:"type"`
-	LastRun     time.Time  `json:"lastRun,omitempty"`
-	NextRun     time.Time  `json:"nextRun,omitempty"`
-	Status      TaskStatus `json:"status"`
-	CreatedAt   time.Time  `json:"createdAt,omitempty"`
-	UpdatedAt   time.Time  `json:"updatedAt,omitempty"`
+	Body        string            `json:"body,omitempty" description:"HTTP request body for HTTP tasks"`
+	Schedule    string            `json:"schedule"`
+	RunAt       *time.Time        `json:"runAt,omitempty"`
+	Enabled     bool              `json:"enabled"`
+	Type        TaskType          `json:"type"`
+	LastRun     time.Time         `json:"lastRun,omitempty"`
+	NextRun     time.Time         `json:"nextRun,omitempty"`
+	Status      TaskStatus        `json:"status"`
+	CreatedAt   time.Time         `json:"createdAt,omitempty"`
+	UpdatedAt   time.Time         `json:"updatedAt,omitempty"`
 }
 
 // Result contains the results of a task execution.
@@ -85,6 +86,7 @@ type TaskStore interface {
 	LoadTasks() ([]*Task, error)
 	GetDueTasks(now time.Time) ([]*Task, error)
 	AdvanceNextRun(taskID string, currentNextRun time.Time, newNextRun time.Time) (bool, error)
+	ConsumeOneShot(taskID string, currentNextRun time.Time) (bool, error)
 }
 
 // MaxQueryRows is the maximum number of rows returned by QueryDB.
