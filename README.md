@@ -4,7 +4,8 @@ Model Context Protocol (MCP) server for scheduling and managing tasks through a 
 
 ## Features
 
-- Schedule shell command or prompt to AI tasks using cron expressions
+- Schedule shell commands, HTTP requests, or AI prompts using cron expressions
+- Run a shell, HTTP, or AI task once at an absolute time with `run_at`
 - AI can have access to MCP servers 
 - [Manage tasks](#available-mcp-tools) via MCP protocol
 - Task execution with command output capture
@@ -240,9 +241,9 @@ The server exposes several tools through the MCP protocol:
 
 1. `list_tasks` - Lists all tasks (scheduled and on-demand)
 2. `get_task` - Gets a specific task by ID
-3. `add_task` - Adds a new shell command task (provide `schedule` for recurring, or omit for on-demand)
-4. `add_ai_task` - Adds a new AI (LLM) task with a prompt (provide `schedule` for recurring, or omit for on-demand)
-5. `add_http_task` - Adds a new HTTP (webhook) task that issues an HTTP request to a `url` (provide `schedule` for recurring, or omit for on-demand)
+3. `add_task` - Adds a new shell command task (provide `schedule` for recurring, `run_at` for one-shot, or omit both for on-demand)
+4. `add_ai_task` - Adds a new AI (LLM) task with a prompt (provide `schedule` for recurring, `run_at` for one-shot, or omit both for on-demand)
+5. `add_http_task` - Adds a new HTTP (webhook) task that issues an HTTP request to a `url` (provide `schedule` for recurring, `run_at` for one-shot, or omit both for on-demand)
 6. `update_task` - Updates an existing task
 7. `remove_task` - Removes a task by ID
 8. `run_task` - Executes a task by ID, waits for completion, and returns the result (for on-demand tasks or ad-hoc runs of scheduled tasks)
@@ -264,6 +265,7 @@ Tasks have the following structure:
   "prompt": "Analyze yesterday's sales data and provide a summary",
   "type": "shell_command",
   "description": "An example task that runs every 5 minutes",
+  "runAt": null,
   "enabled": true,
   "lastRun": "2025-01-01T12:00:00Z",
   "nextRun": "2025-01-01T12:05:00Z",
@@ -291,11 +293,30 @@ For HTTP tasks, the result row reuses the existing columns:
 
 This keeps `query_task_result` queries uniform — e.g. `SELECT COUNT(*) FROM results WHERE task_id='x' AND exit_code >= 200 AND exit_code < 300` counts successful HTTP calls.
 
-**Scheduled vs on-demand tasks:**
-- **Scheduled**: Provide a `schedule` (cron expression) — the task runs automatically on that schedule.
-- **On-demand**: Omit `schedule` — the task sits idle until triggered via `run_task`.
+**Task modes:**
+- **Recurring**: Provide `schedule` and omit `run_at`. The task runs automatically on its cron schedule.
+- **One-shot**: Provide `run_at` and omit `schedule`. The task runs once at that absolute time.
+- **On-demand**: Omit both `schedule` and `run_at`. The task sits idle until triggered via `run_task`.
+- `schedule` and `run_at` are mutually exclusive.
 
-`run_task` also works on scheduled tasks for ad-hoc execution outside their normal schedule. After execution, scheduled tasks resume their normal schedule; on-demand tasks return to idle.
+`run_at` must be an absolute RFC 3339 timestamp, such as `2026-09-01T14:30:00-04:00`. The server normalizes it to UTC for storage and comparison, and exposes it as `runAt` in task responses. A timestamp in the past is valid and runs on the next scheduler poll. Relative values such as `10m` are rejected.
+
+For example, this creates an enabled one-shot shell task:
+
+```json
+{
+  "name": "Send the report",
+  "command": "./send-report.sh",
+  "run_at": "2026-09-01T14:30:00-04:00",
+  "enabled": true
+}
+```
+
+Disabled one-shot tasks retain their `runAt` value but have no `nextRun`. `enable_task` arms a pending one-shot for its configured time; `disable_task` disarms it without clearing `runAt`. An update with `run_at: null` clears the one-shot time, while an explicitly supplied new timestamp can re-arm an enabled task.
+
+The scheduler claims a due one-shot before starting its executor. A successful claim clears `runAt` and `nextRun` and disables the task, so the task is consumed even if execution fails or the process terminates afterward. One-shot tasks are not automatically retried; update the task with a new `run_at` to schedule it again. `run_task` consumes an armed one-shot immediately and returns the resulting execution record.
+
+`run_task` also works on recurring tasks for ad-hoc execution outside their normal schedule. After execution, recurring tasks resume their normal schedule; on-demand tasks return to idle.
 
 ### Task Status
 

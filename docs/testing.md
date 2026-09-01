@@ -3,20 +3,24 @@
 ## Unit Tests
 
 ```bash
-# Run all tests
-go test ./...
+# Run all tests (disable VCS stamping for reproducible local checks)
+GOFLAGS=-buildvcs=false go test ./...
 
 # Run tests with coverage
-go test ./... -cover
+GOFLAGS=-buildvcs=false go test ./... -cover
 ```
 
 ## Integration Tests
 
-Integration tests exercise the full MCP handler workflow (add → list → get → execute → get_task_result) for both shell command and AI task types.
+Integration tests exercise the full MCP handler workflow (add → list → get → execute → get_task_result) for shell, HTTP, and AI task types. One-shot integration tests use temporary SQLite databases, real local shell execution, and `httptest`; they do not require external services or credentials.
 
 ```bash
 # Run integration tests only
-go test ./internal/server/ -run TestIntegration -v
+GOFLAGS=-buildvcs=false go test ./internal/server/ -run TestIntegration -v
+
+# Run the one-shot server and scheduler coverage directly
+GOFLAGS=-buildvcs=false go test ./internal/server/ -run 'TestIntegration_.*OneShot|TestIntegration_RunTaskConsumesArmedOneShot' -v
+GOFLAGS=-buildvcs=false go test ./internal/scheduler/ -run 'Test(OneShot|RunTaskNowConsumesArmedOneShot)' -v
 ```
 
 ### AI Integration Tests
@@ -46,6 +50,14 @@ MCP_CRON_ENABLE_ANTHROPIC_TESTS=true go test ./...
 | `TestIntegration_OnDemandAITask` | Create an on-demand AI task and verify type/schedule |
 | `TestIntegration_OnDemandRunTaskLifecycle` | Full on-demand lifecycle via poll loop (shell + AI subtests) |
 | `TestIntegration_ScheduledRunTaskResumesSchedule` | run_task on a scheduled task resumes its cron schedule after execution (shell + AI subtests) |
+| `TestIntegration_OneShotPersistsShellAIAndHTTPTasks` | Future `run_at` values round-trip through SQLite for shell, AI, and HTTP tasks and become `next_run` when enabled |
+| `TestIntegration_OneShotShellExecutesPersistsResultAndConsumes` | A past shell one-shot runs automatically, persists its result, and is consumed exactly once |
+| `TestIntegration_OneShotHTTPExecutesAgainstLocalServer` | A past HTTP one-shot calls a local `httptest` endpoint and persists status, body, and URL |
+| `TestIntegration_OneShotPastTimestampWaitsUntilEnabled` | A disabled past one-shot does not run until enabled, then arms and executes |
+| `TestIntegration_RunTaskConsumesArmedOneShot` | `run_task` immediately consumes an armed one-shot; a second trigger receives the disabled-task error |
+| `TestIntegration_FailedOneShotIsConsumedAcrossRestart` | Executor failure still leaves a one-shot consumed, and a restart does not retry it |
+| `TestIntegration_OneShotRestartRepairsMissingNextRun` | Loading an enabled one-shot with a missing `next_run` repairs the trigger from `run_at` |
+| `TestIntegration_OneShotSharedDatabaseExecutesFailedTaskOnce` | Two schedulers sharing SQLite claim and execute a due one-shot once, even when execution fails |
 | `TestIntegration_AITaskGetTaskResult` | AI task calls internal get_task_result to access prior execution output |
 | `TestRunTaskIntegration_InternalGetTaskResult_MCPNamespace` | OpenAI model discovers get_task_result from system message alone (no tool name in prompt) |
 | `TestRunTaskIntegration_InternalGetTaskResult_MCPNamespaceAnthropic` | Anthropic model discovers get_task_result from system message alone |
@@ -61,6 +73,7 @@ MCP_CRON_ENABLE_ANTHROPIC_TESTS=true go test ./...
 ## Linting
 
 ```bash
+GOFLAGS=-buildvcs=false go vet ./...
 go tool golangci-lint run
 ```
 

@@ -1,15 +1,17 @@
 # CLAUDE.md
 
-Go MCP server for cron task scheduling (shell commands and AI prompts).
+Go MCP server for recurring, one-shot, and on-demand task scheduling (shell commands, HTTP requests, and AI prompts).
 
 ## Build & Test
 
 ```bash
 go build ./...                # build all packages
-go test ./...                 # run all tests
-go test ./... -cover          # run tests with coverage
+GOFLAGS=-buildvcs=false go test ./...                 # run all tests
+GOFLAGS=-buildvcs=false go test ./... -cover          # run tests with coverage
+GOFLAGS=-buildvcs=false go test -race ./...           # race detector
+GOFLAGS=-buildvcs=false go vet ./...                  # vet
 go tool golangci-lint run     # lint (installed as go tool dependency in go.mod)
-go test ./internal/server/ -run TestIntegration -v  # integration tests only
+GOFLAGS=-buildvcs=false go test ./internal/server/ -run TestIntegration -v  # integration tests only
 MCP_CRON_ENABLE_OPENAI_TESTS=true go test ./...     # include AI integration tests (requires OPENAI_API_KEY)
 MCP_CRON_ENABLE_ANTHROPIC_TESTS=true go test ./...  # include AI integration tests (requires ANTHROPIC_API_KEY)
 ```
@@ -26,7 +28,7 @@ internal/
   http/                # HTTP (webhook) task executor — issues a request, captures status/body/latency
   logging/             # Leveled logger (Debug/Info/Warn/Error/Fatal), file + stdout
   model/               # Core types: Task, Result, TaskType, TaskStatus, Executor, ResultStore interfaces
-  scheduler/           # Poll-based DB scheduler (robfig/cron parser only), optimistic locking for multi-instance dedup
+  scheduler/           # Poll-based DB scheduler (cron + one-shot claims), optimistic locking for multi-instance dedup
   server/              # MCP server, tool registration, HTTP/stdio transport, handlers
   singleton/           # File-lock-based singleton per db-path (primary/secondary instance selection)
   sleep/               # Platform-specific system sleep prevention (macOS, Windows)
@@ -48,7 +50,7 @@ scripts/
 - **Task types**: `shell_command` (runs a command), `AI` (runs an LLM prompt), and `http` (issues an HTTP request — status → `exit_code`, body preview → `output`, latency → `duration`, URL persisted on the result row)
 - **Task statuses**: pending, running, completed, failed, disabled
 - **Storage**: In-memory read cache refreshed from SQLite on each poll tick; SQLite is the source of truth for task definitions and result history (`modernc.org/sqlite`, pure Go)
-- **Scheduling**: Poll-based — `next_run` column in `tasks` table, polled every `PollInterval` (default 1s). Optimistic locking (`UPDATE ... WHERE next_run = :current`) prevents duplicate execution across multiple instances sharing the same DB. Tasks can be **scheduled** (with a cron expression) or **on-demand** (no schedule, triggered via `run_task`).
+- **Scheduling**: Poll-based — the `next_run` column in `tasks` is checked every `PollInterval` (default 1s). Tasks have three mutually exclusive modes: recurring (`schedule` only), one-shot (`run_at` only), or on-demand (neither, triggered via `run_task`). `run_at` accepts an absolute RFC 3339 timestamp and is normalized to UTC. Optimistic locking prevents duplicate recurring execution, while one-shots are atomically claimed before execution; a claimed one-shot is disabled and consumed with no automatic retry.
 - **Responses API vs Chat Completions** (OpenAI provider): The Responses API is only used when talking directly to OpenAI (`api.openai.com`), Azure OpenAI (`*.openai.azure.com`), or with no custom base URL. All other base URLs default to Chat Completions, which is universally supported by third-party proxies (LiteLLM, Ollama, vLLM, Groq, etc.). `IsResponsesAPICapable()` in `config/config.go` controls this via exact hostname matching and suffix matching. The host lists are unexported — all access goes through the function.
 - **AI task system message**: AI tasks receive a short system message (~450 chars) with their task ID, `get_task_result` usage instructions, and MCP namespace prefix mapping. Tool definitions are NOT listed (models get those via the API).
 - **Graceful shutdown**: Scheduler tracks in-flight task goroutines with a `sync.WaitGroup`; `Stop()` blocks until all running tasks complete and persist results. Shutdown timeout is derived from `DefaultTimeout + 1 minute`. Result store is closed last in `app.Stop()`, after scheduler and server.
@@ -59,6 +61,8 @@ scripts/
 ## MCP Tools Exposed
 
 list_tasks, get_task, get_task_result, query_task_result, add_task, add_ai_task, add_http_task, update_task, remove_task, run_task, enable_task, disable_task
+
+`add_task`, `add_ai_task`, `add_http_task`, and `update_task` accept the optional `run_at` field for one-shot tasks. In `update_task`, omitting `run_at` preserves its current value and `run_at: null` clears it.
 
 ## Dependencies
 
