@@ -76,15 +76,25 @@ func (s *Scheduler) AddTask(task *model.Task) error {
 	if _, exists := s.tasks[task.ID]; exists {
 		return errors.AlreadyExists("task", task.ID)
 	}
+	if task.Schedule != "" && task.RunAt != nil {
+		return errors.InvalidInput("schedule and run_at are mutually exclusive")
+	}
 
-	// Compute next_run for enabled tasks with a schedule
-	if task.Enabled && task.Schedule != "" {
-		nextRun, err := s.computeNextRun(task.Schedule)
-		if err != nil {
-			task.Status = model.StatusFailed
-			return err
+	// Compute next_run only for an enabled recurring or one-shot task. A
+	// disabled or on-demand task must not retain a false execution trigger.
+	task.NextRun = time.Time{}
+	if task.Enabled {
+		switch {
+		case task.Schedule != "":
+			nextRun, err := s.computeNextRun(task.Schedule)
+			if err != nil {
+				task.Status = model.StatusFailed
+				return err
+			}
+			task.NextRun = nextRun
+		case task.RunAt != nil:
+			task.NextRun = *task.RunAt
 		}
-		task.NextRun = nextRun
 	}
 
 	// Persist to store first
@@ -136,12 +146,15 @@ func (s *Scheduler) EnableTask(taskID string) error {
 	if task.Enabled {
 		return nil // Already enabled
 	}
+	if task.Schedule != "" && task.RunAt != nil {
+		return errors.InvalidInput("schedule and run_at are mutually exclusive")
+	}
 
 	task.Enabled = true
 	task.Status = model.StatusPending
 	task.UpdatedAt = s.now()
 
-	// Compute next_run for scheduled tasks only
+	// Arm recurring and one-shot tasks; on-demand tasks remain idle.
 	if task.Schedule != "" {
 		nextRun, err := s.computeNextRun(task.Schedule)
 		if err != nil {
@@ -150,6 +163,10 @@ func (s *Scheduler) EnableTask(taskID string) error {
 			return err
 		}
 		task.NextRun = nextRun
+	} else if task.RunAt != nil {
+		task.NextRun = *task.RunAt
+	} else {
+		task.NextRun = time.Time{}
 	}
 
 	// Persist to store
@@ -227,18 +244,23 @@ func (s *Scheduler) UpdateTask(task *model.Task) error {
 	if !exists {
 		return errors.NotFound("task", task.ID)
 	}
+	if task.Schedule != "" && task.RunAt != nil {
+		return errors.InvalidInput("schedule and run_at are mutually exclusive")
+	}
 
-	// Recompute next_run if enabled and has a schedule
-	if task.Enabled && task.Schedule != "" {
-		nextRun, err := s.computeNextRun(task.Schedule)
-		if err != nil {
-			return err
+	// Recompute next_run from the final task mode.
+	task.NextRun = time.Time{}
+	if task.Enabled {
+		switch {
+		case task.Schedule != "":
+			nextRun, err := s.computeNextRun(task.Schedule)
+			if err != nil {
+				return err
+			}
+			task.NextRun = nextRun
+		case task.RunAt != nil:
+			task.NextRun = *task.RunAt
 		}
-		task.NextRun = nextRun
-	} else if !task.Enabled {
-		task.NextRun = time.Time{} // Clear next_run for disabled tasks
-	} else {
-		task.NextRun = time.Time{} // On-demand task: no schedule, clear next_run
 	}
 
 	// Update the task
