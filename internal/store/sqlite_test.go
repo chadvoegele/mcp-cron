@@ -3,6 +3,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -212,6 +213,88 @@ func TestMigrationIdempotent(t *testing.T) {
 	_ = s2.Close()
 }
 
+func TestMigrationAddsRunAtToExistingDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "pre-migration.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open pre-migration database: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE schema_version (version INTEGER NOT NULL);
+		INSERT INTO schema_version (version) VALUES (4);
+		CREATE TABLE results (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id TEXT NOT NULL,
+			command TEXT DEFAULT '', prompt TEXT DEFAULT '', output TEXT DEFAULT '',
+			error TEXT DEFAULT '', exit_code INTEGER DEFAULT 0,
+			start_time TEXT NOT NULL, end_time TEXT NOT NULL, duration TEXT DEFAULT '',
+			url TEXT DEFAULT ''
+		);
+		CREATE TABLE tasks (
+			id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '',
+			type TEXT NOT NULL, command TEXT DEFAULT '', prompt TEXT DEFAULT '',
+			schedule TEXT NOT NULL, enabled INTEGER DEFAULT 1,
+			created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+			next_run TEXT DEFAULT '', url TEXT DEFAULT '', method TEXT DEFAULT '',
+			headers_json TEXT DEFAULT '', body TEXT DEFAULT ''
+		);`)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("create pre-migration database: %v", err)
+	}
+	legacyNow := time.Now().UTC().Truncate(time.Microsecond)
+	_, err = db.Exec(`
+		INSERT INTO tasks (id, name, type, schedule, enabled, created_at, updated_at, next_run)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"legacy-task", "Legacy", model.TypeShellCommand, "@daily", 1,
+		legacyNow.Format(timeFormat), legacyNow.Format(timeFormat), "")
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("insert legacy task: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close pre-migration database: %v", err)
+	}
+
+	s, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("migrate pre-migration database: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	var version int
+	if err := s.db.QueryRow("SELECT version FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("read migrated schema version: %v", err)
+	}
+	if version != 5 {
+		t.Fatalf("schema version = %d, want 5", version)
+	}
+	var runAt string
+	if err := s.db.QueryRow("SELECT run_at FROM tasks WHERE id = ?", "legacy-task").Scan(&runAt); err != nil {
+		t.Fatalf("read migrated run_at column: %v", err)
+	}
+	if runAt != "" {
+		t.Fatalf("legacy run_at = %q, want empty", runAt)
+	}
+	tasks, err := s.LoadTasks()
+	if err != nil {
+		t.Fatalf("LoadTasks after migration: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].RunAt != nil {
+		t.Fatalf("legacy task RunAt = %#v, want nil", tasks)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	runAtTime := now.Add(time.Hour)
+	if err := s.SaveTask(&model.Task{
+		ID: "migrated-task", Name: "Migrated", Type: model.TypeShellCommand,
+		Command: "echo migrated", RunAt: &runAtTime, NextRun: runAtTime,
+		Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveTask after migration: %v", err)
+	}
+}
+
 // --- Task persistence tests ---
 
 func TestSaveAndLoadTask(t *testing.T) {
@@ -310,15 +393,15 @@ func TestSaveAndLoadHTTPTask(t *testing.T) {
 
 	now := time.Now().Truncate(time.Microsecond)
 	task := &model.Task{
-		ID:       "http-task-1",
-		Name:     "Webhook Task",
-		Type:     "http",
-		URL:      "https://example.com/hook",
-		Method:   "POST",
-		Headers:  map[string]string{"Authorization": "Bearer secret", "X-Source": "mcp-cron"},
-		Body:     `{"hello":"world"}`,
-		Schedule: "@hourly",
-		Enabled:  true,
+		ID:        "http-task-1",
+		Name:      "Webhook Task",
+		Type:      "http",
+		URL:       "https://example.com/hook",
+		Method:    "POST",
+		Headers:   map[string]string{"Authorization": "Bearer secret", "X-Source": "mcp-cron"},
+		Body:      `{"hello":"world"}`,
+		Schedule:  "@hourly",
+		Enabled:   true,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -350,6 +433,80 @@ func TestSaveAndLoadHTTPTask(t *testing.T) {
 	}
 	if got.Headers["Authorization"] != "Bearer secret" || got.Headers["X-Source"] != "mcp-cron" {
 		t.Errorf("Headers round-trip failed: %#v", got.Headers)
+	}
+}
+
+func TestRunAtRoundTripNormalizesUTC(t *testing.T) {
+	s := newTestStore(t)
+
+	location := time.FixedZone("UTC+02", 2*60*60)
+	runAt := time.Date(2026, time.January, 10, 14, 30, 0, 123456789, location)
+	task := &model.Task{
+		ID: "one-shot-round-trip", Name: "One shot", Type: model.TypeShellCommand,
+		Command: "echo once", RunAt: &runAt, NextRun: runAt, Enabled: true,
+		CreatedAt: runAt, UpdatedAt: runAt,
+	}
+
+	if err := s.SaveTask(task); err != nil {
+		t.Fatalf("SaveTask: %v", err)
+	}
+
+	tasks, err := s.LoadTasks()
+	if err != nil {
+		t.Fatalf("LoadTasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].RunAt == nil {
+		t.Fatalf("expected one task with RunAt, got %#v", tasks)
+	}
+	got := tasks[0]
+	if !got.RunAt.Equal(runAt) {
+		t.Errorf("RunAt = %v, want instant %v", got.RunAt, runAt)
+	}
+	if got.RunAt.Location() != time.UTC {
+		t.Errorf("RunAt location = %v, want UTC", got.RunAt.Location())
+	}
+	if !got.NextRun.Equal(runAt) || got.NextRun.Location() != time.UTC {
+		t.Errorf("NextRun = %v, want UTC instant %v", got.NextRun, runAt)
+	}
+
+	updatedRunAt := runAt.Add(time.Hour).In(location)
+	task.RunAt = &updatedRunAt
+	task.NextRun = updatedRunAt
+	if err := s.UpdateTask(task); err != nil {
+		t.Fatalf("UpdateTask: %v", err)
+	}
+	tasks, err = s.LoadTasks()
+	if err != nil {
+		t.Fatalf("LoadTasks after update: %v", err)
+	}
+	if !tasks[0].RunAt.Equal(updatedRunAt) {
+		t.Errorf("updated RunAt = %v, want instant %v", tasks[0].RunAt, updatedRunAt)
+	}
+}
+
+func TestGetDueTasksLoadsOneShotRunAtWithOffset(t *testing.T) {
+	s := newTestStore(t)
+
+	now := time.Date(2026, time.January, 10, 12, 0, 0, 0, time.UTC)
+	location := time.FixedZone("UTC+02", 2*60*60)
+	runAt := now.In(location)
+	if err := s.SaveTask(&model.Task{
+		ID: "due-one-shot", Name: "Due one shot", Type: model.TypeShellCommand,
+		Command: "echo due", RunAt: &runAt, NextRun: runAt, Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveTask: %v", err)
+	}
+
+	dueTasks, err := s.GetDueTasks(now)
+	if err != nil {
+		t.Fatalf("GetDueTasks: %v", err)
+	}
+	if len(dueTasks) != 1 {
+		t.Fatalf("expected one due task, got %d", len(dueTasks))
+	}
+	if dueTasks[0].RunAt == nil || !dueTasks[0].RunAt.Equal(now) {
+		t.Errorf("due RunAt = %v, want %v", dueTasks[0].RunAt, now)
 	}
 }
 
@@ -747,6 +904,120 @@ func TestAdvanceNextRun(t *testing.T) {
 	}
 	if !tasks[0].NextRun.Truncate(time.Microsecond).Equal(newNextRun) {
 		t.Errorf("NextRun = %v, want %v", tasks[0].NextRun, newNextRun)
+	}
+}
+
+func TestConsumeOneShot(t *testing.T) {
+	s := newTestStore(t)
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	runAt := now.Add(time.Minute)
+	if err := s.SaveTask(&model.Task{
+		ID: "consume-one-shot", Name: "Consume", Type: model.TypeShellCommand,
+		Command: "echo consume", RunAt: &runAt, NextRun: runAt, Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveTask: %v", err)
+	}
+
+	consumed, err := s.ConsumeOneShot("consume-one-shot", runAt)
+	if err != nil {
+		t.Fatalf("ConsumeOneShot: %v", err)
+	}
+	if !consumed {
+		t.Fatal("expected one-shot to be consumed")
+	}
+
+	tasks, err := s.LoadTasks()
+	if err != nil {
+		t.Fatalf("LoadTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected one task, got %d", len(tasks))
+	}
+	got := tasks[0]
+	if got.Enabled {
+		t.Error("consumed task is enabled, want false")
+	}
+	if got.RunAt != nil {
+		t.Errorf("consumed RunAt = %v, want nil", got.RunAt)
+	}
+	if !got.NextRun.IsZero() {
+		t.Errorf("consumed NextRun = %v, want zero", got.NextRun)
+	}
+	if got.Status != model.StatusDisabled {
+		t.Errorf("consumed Status = %q, want %q", got.Status, model.StatusDisabled)
+	}
+
+	consumed, err = s.ConsumeOneShot("consume-one-shot", runAt)
+	if err != nil {
+		t.Fatalf("ConsumeOneShot a second time: %v", err)
+	}
+	if consumed {
+		t.Fatal("expected consumed one-shot not to be consumed again")
+	}
+}
+
+func TestConsumeOneShotRejectsStaleClaim(t *testing.T) {
+	s := newTestStore(t)
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	runAt := now.Add(time.Minute)
+	if err := s.SaveTask(&model.Task{
+		ID: "stale-one-shot", Name: "Stale", Type: model.TypeShellCommand,
+		Command: "echo stale", RunAt: &runAt, NextRun: runAt, Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveTask: %v", err)
+	}
+
+	consumed, err := s.ConsumeOneShot("stale-one-shot", runAt.Add(-time.Second))
+	if err != nil {
+		t.Fatalf("ConsumeOneShot stale claim: %v", err)
+	}
+	if consumed {
+		t.Fatal("expected stale claim to be rejected")
+	}
+
+	tasks, err := s.LoadTasks()
+	if err != nil {
+		t.Fatalf("LoadTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected one task, got %d", len(tasks))
+	}
+	if !tasks[0].Enabled || tasks[0].RunAt == nil || !tasks[0].NextRun.Equal(runAt) {
+		t.Errorf("stale claim changed task state: %+v", tasks[0])
+	}
+}
+
+func TestTaskPersistenceClearsSpuriousNextRun(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	for _, task := range []*model.Task{
+		{
+			ID: "disabled-with-next-run", Name: "Disabled", Type: model.TypeShellCommand,
+			NextRun: now, Enabled: false, CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "on-demand-with-next-run", Name: "On demand", Type: model.TypeShellCommand,
+			NextRun: now, Enabled: true, CreatedAt: now, UpdatedAt: now,
+		},
+	} {
+		if err := s.SaveTask(task); err != nil {
+			t.Fatalf("SaveTask %s: %v", task.ID, err)
+		}
+	}
+
+	tasks, err := s.LoadTasks()
+	if err != nil {
+		t.Fatalf("LoadTasks: %v", err)
+	}
+	for _, task := range tasks {
+		if !task.NextRun.IsZero() {
+			t.Errorf("task %s retained spurious NextRun %v", task.ID, task.NextRun)
+		}
 	}
 }
 

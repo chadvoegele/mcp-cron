@@ -76,15 +76,25 @@ func (s *Scheduler) AddTask(task *model.Task) error {
 	if _, exists := s.tasks[task.ID]; exists {
 		return errors.AlreadyExists("task", task.ID)
 	}
+	if task.Schedule != "" && task.RunAt != nil {
+		return errors.InvalidInput("schedule and run_at are mutually exclusive")
+	}
 
-	// Compute next_run for enabled tasks with a schedule
-	if task.Enabled && task.Schedule != "" {
-		nextRun, err := s.computeNextRun(task.Schedule)
-		if err != nil {
-			task.Status = model.StatusFailed
-			return err
+	// Compute next_run only for an enabled recurring or one-shot task. A
+	// disabled or on-demand task must not retain a false execution trigger.
+	task.NextRun = time.Time{}
+	if task.Enabled {
+		switch {
+		case task.Schedule != "":
+			nextRun, err := s.computeNextRun(task.Schedule)
+			if err != nil {
+				task.Status = model.StatusFailed
+				return err
+			}
+			task.NextRun = nextRun
+		case task.RunAt != nil:
+			task.NextRun = *task.RunAt
 		}
-		task.NextRun = nextRun
 	}
 
 	// Persist to store first
@@ -136,12 +146,15 @@ func (s *Scheduler) EnableTask(taskID string) error {
 	if task.Enabled {
 		return nil // Already enabled
 	}
+	if task.Schedule != "" && task.RunAt != nil {
+		return errors.InvalidInput("schedule and run_at are mutually exclusive")
+	}
 
 	task.Enabled = true
 	task.Status = model.StatusPending
 	task.UpdatedAt = s.now()
 
-	// Compute next_run for scheduled tasks only
+	// Arm recurring and one-shot tasks; on-demand tasks remain idle.
 	if task.Schedule != "" {
 		nextRun, err := s.computeNextRun(task.Schedule)
 		if err != nil {
@@ -150,6 +163,10 @@ func (s *Scheduler) EnableTask(taskID string) error {
 			return err
 		}
 		task.NextRun = nextRun
+	} else if task.RunAt != nil {
+		task.NextRun = *task.RunAt
+	} else {
+		task.NextRun = time.Time{}
 	}
 
 	// Persist to store
@@ -227,18 +244,23 @@ func (s *Scheduler) UpdateTask(task *model.Task) error {
 	if !exists {
 		return errors.NotFound("task", task.ID)
 	}
+	if task.Schedule != "" && task.RunAt != nil {
+		return errors.InvalidInput("schedule and run_at are mutually exclusive")
+	}
 
-	// Recompute next_run if enabled and has a schedule
-	if task.Enabled && task.Schedule != "" {
-		nextRun, err := s.computeNextRun(task.Schedule)
-		if err != nil {
-			return err
+	// Recompute next_run from the final task mode.
+	task.NextRun = time.Time{}
+	if task.Enabled {
+		switch {
+		case task.Schedule != "":
+			nextRun, err := s.computeNextRun(task.Schedule)
+			if err != nil {
+				return err
+			}
+			task.NextRun = nextRun
+		case task.RunAt != nil:
+			task.NextRun = *task.RunAt
 		}
-		task.NextRun = nextRun
-	} else if !task.Enabled {
-		task.NextRun = time.Time{} // Clear next_run for disabled tasks
-	} else {
-		task.NextRun = time.Time{} // On-demand task: no schedule, clear next_run
 	}
 
 	// Update the task
@@ -317,14 +339,25 @@ func (s *Scheduler) LoadTasks() error {
 			continue // skip duplicates
 		}
 		s.tasks[task.ID] = task
-		// Compute next_run for enabled scheduled tasks that don't have one
-		if task.Enabled && task.NextRun.IsZero() && task.Schedule != "" {
-			nextRun, err := s.computeNextRun(task.Schedule)
-			if err != nil {
-				task.Status = model.StatusFailed
-				s.logger.Warnf("Failed to compute next_run for persisted task %s: %v", task.ID, err)
+		// Repair next_run for enabled recurring and one-shot tasks that do not
+		// have an armed execution time. On-demand tasks remain idle.
+		if task.Enabled && task.NextRun.IsZero() {
+			var nextRun time.Time
+			switch {
+			case task.Schedule != "":
+				var err error
+				nextRun, err = s.computeNextRun(task.Schedule)
+				if err != nil {
+					task.Status = model.StatusFailed
+					s.logger.Warnf("Failed to compute next_run for persisted task %s: %v", task.ID, err)
+					continue
+				}
+			case task.RunAt != nil && task.Schedule == "":
+				nextRun = *task.RunAt
+			default:
 				continue
 			}
+
 			task.NextRun = nextRun
 			if s.taskStore != nil {
 				if err := s.taskStore.UpdateTask(task); err != nil {
@@ -404,6 +437,35 @@ func (s *Scheduler) pollTick() {
 	}
 
 	for _, task := range dueTasks {
+		// A one-shot is claimed by consuming its configured run_at before its
+		// executor is started. This is intentionally separate from the
+		// recurring/on-demand next_run advancement path: a successful claim is
+		// permanent, even when execution later fails or the process exits.
+		if task.Schedule == "" && task.RunAt != nil {
+			claimed, err := s.taskStore.ConsumeOneShot(task.ID, task.NextRun)
+			if err != nil {
+				s.logger.Errorf("Poll: failed to consume one-shot task %s: %v", task.ID, err)
+				continue
+			}
+			if !claimed {
+				continue // Another instance got it, or the task was changed.
+			}
+
+			// Reflect the durable claim in memory before the executor starts.
+			s.mu.Lock()
+			if memTask, exists := s.tasks[task.ID]; exists {
+				memTask.Enabled = false
+				memTask.RunAt = nil
+				memTask.NextRun = time.Time{}
+				memTask.Status = model.StatusDisabled
+			}
+			s.mu.Unlock()
+
+			s.taskWg.Add(1)
+			go s.executeTask(task)
+			continue
+		}
+
 		// Compute next_run from schedule (on-demand tasks go back to idle)
 		var newNextRun time.Time
 		if task.Schedule != "" {
