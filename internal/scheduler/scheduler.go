@@ -339,14 +339,25 @@ func (s *Scheduler) LoadTasks() error {
 			continue // skip duplicates
 		}
 		s.tasks[task.ID] = task
-		// Compute next_run for enabled scheduled tasks that don't have one
-		if task.Enabled && task.NextRun.IsZero() && task.Schedule != "" {
-			nextRun, err := s.computeNextRun(task.Schedule)
-			if err != nil {
-				task.Status = model.StatusFailed
-				s.logger.Warnf("Failed to compute next_run for persisted task %s: %v", task.ID, err)
+		// Repair next_run for enabled recurring and one-shot tasks that do not
+		// have an armed execution time. On-demand tasks remain idle.
+		if task.Enabled && task.NextRun.IsZero() {
+			var nextRun time.Time
+			switch {
+			case task.Schedule != "":
+				var err error
+				nextRun, err = s.computeNextRun(task.Schedule)
+				if err != nil {
+					task.Status = model.StatusFailed
+					s.logger.Warnf("Failed to compute next_run for persisted task %s: %v", task.ID, err)
+					continue
+				}
+			case task.RunAt != nil && task.Schedule == "":
+				nextRun = *task.RunAt
+			default:
 				continue
 			}
+
 			task.NextRun = nextRun
 			if s.taskStore != nil {
 				if err := s.taskStore.UpdateTask(task); err != nil {
@@ -426,6 +437,35 @@ func (s *Scheduler) pollTick() {
 	}
 
 	for _, task := range dueTasks {
+		// A one-shot is claimed by consuming its configured run_at before its
+		// executor is started. This is intentionally separate from the
+		// recurring/on-demand next_run advancement path: a successful claim is
+		// permanent, even when execution later fails or the process exits.
+		if task.Schedule == "" && task.RunAt != nil {
+			claimed, err := s.taskStore.ConsumeOneShot(task.ID, task.NextRun)
+			if err != nil {
+				s.logger.Errorf("Poll: failed to consume one-shot task %s: %v", task.ID, err)
+				continue
+			}
+			if !claimed {
+				continue // Another instance got it, or the task was changed.
+			}
+
+			// Reflect the durable claim in memory before the executor starts.
+			s.mu.Lock()
+			if memTask, exists := s.tasks[task.ID]; exists {
+				memTask.Enabled = false
+				memTask.RunAt = nil
+				memTask.NextRun = time.Time{}
+				memTask.Status = model.StatusDisabled
+			}
+			s.mu.Unlock()
+
+			s.taskWg.Add(1)
+			go s.executeTask(task)
+			continue
+		}
+
 		// Compute next_run from schedule (on-demand tasks go back to idle)
 		var newNextRun time.Time
 		if task.Schedule != "" {
