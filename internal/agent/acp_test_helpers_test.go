@@ -19,7 +19,7 @@ func newFakeACPAgent(t *testing.T, handler func(net.Conn, *bufio.Scanner) error)
 }
 
 func (s *fakeACPAgent) socketPath() string {
-	return s.SocketPath()
+	return s.Command()
 }
 
 func (s *fakeACPAgent) waitForDisconnect(t *testing.T) {

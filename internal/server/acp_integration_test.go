@@ -23,7 +23,7 @@ import (
 func acpTestConfig(socketPath, cwd, mcpConfigPath string) func(*config.Config) {
 	return func(cfg *config.Config) {
 		cfg.AI.Provider = config.ProviderACP
-		cfg.AI.ACPSocket = socketPath
+		cfg.AI.ACPCommand = socketPath
 		cfg.AI.ACPCWD = cwd
 		cfg.AI.APIKey = ""
 		cfg.AI.OpenAIAPIKey = ""
@@ -108,7 +108,7 @@ func TestIntegration_ACPTaskAPIAndSQLiteReload(t *testing.T) {
 		withStore:    true,
 		pollInterval: 10 * time.Millisecond,
 		dbPath:       dbPath,
-		configure:    acpTestConfig(fake.SocketPath(), cwd, mcpConfigPath),
+		configure:    acpTestConfig(fake.Command(), cwd, mcpConfigPath),
 	})
 
 	task := mustAddAITask(t, srv, AITaskParams{
@@ -187,7 +187,7 @@ func TestIntegration_ACPScheduledExecutionPersistsResult(t *testing.T) {
 	srv := createIntegrationTestServer(t, integrationOpts{
 		withStore:    true,
 		pollInterval: 10 * time.Millisecond,
-		configure:    acpTestConfig(fake.SocketPath(), cwd, mcpConfigPath),
+		configure:    acpTestConfig(fake.Command(), cwd, mcpConfigPath),
 	})
 
 	task := mustAddAITask(t, srv, AITaskParams{
@@ -280,7 +280,7 @@ func TestIntegration_ACPConcurrentRunsUseIsolatedSessions(t *testing.T) {
 	})
 	srv := createIntegrationTestServer(t, integrationOpts{
 		pollInterval: 10 * time.Millisecond,
-		configure:    acpTestConfig(fake.SocketPath(), cwd, mcpConfigPath),
+		configure:    acpTestConfig(fake.Command(), cwd, mcpConfigPath),
 	})
 
 	tasks := []model.Task{

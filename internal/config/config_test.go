@@ -68,8 +68,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.AI.MCPConfigFilePath != expectedPath {
 		t.Errorf("Expected default MCP config file path to be '%s', got '%s'", expectedPath, cfg.AI.MCPConfigFilePath)
 	}
-	if cfg.AI.ACPSocket != "" {
-		t.Errorf("Expected default ACP socket path to be empty, got '%s'", cfg.AI.ACPSocket)
+	if cfg.AI.ACPCommand != "" {
+		t.Errorf("Expected default ACP command to be empty, got '%s'", cfg.AI.ACPCommand)
 	}
 	if cfg.AI.ACPCWD != "" {
 		t.Errorf("Expected default ACP working directory to be empty, got '%s'", cfg.AI.ACPCWD)
@@ -148,7 +148,7 @@ func TestValidate(t *testing.T) {
 
 	validACP := DefaultConfig()
 	validACP.AI.Provider = ProviderACP
-	validACP.AI.ACPSocket = "/run/my-agent/acp.sock"
+	validACP.AI.ACPCommand = `my-agent --name "cron agent"`
 	validACP.AI.ACPCWD = "/home/chad/project"
 	validACP.AI.APIKey = ""
 	validACP.AI.OpenAIAPIKey = ""
@@ -161,20 +161,20 @@ func TestValidate(t *testing.T) {
 	}
 
 	acpPathTests := []struct {
-		name   string
-		socket string
-		cwd    string
+		name    string
+		command string
+		cwd     string
 	}{
-		{name: "missing socket", socket: "", cwd: "/home/chad/project"},
-		{name: "relative socket", socket: "run/acp.sock", cwd: "/home/chad/project"},
-		{name: "missing cwd", socket: "/run/my-agent/acp.sock", cwd: ""},
-		{name: "relative cwd", socket: "/run/my-agent/acp.sock", cwd: "project"},
+		{name: "missing command", command: "", cwd: "/home/chad/project"},
+		{name: "blank command", command: "  ", cwd: "/home/chad/project"},
+		{name: "missing cwd", command: "my-agent --acp", cwd: ""},
+		{name: "relative cwd", command: "my-agent --acp", cwd: "project"},
 	}
 	for _, tt := range acpPathTests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.AI.Provider = ProviderACP
-			cfg.AI.ACPSocket = tt.socket
+			cfg.AI.ACPCommand = tt.command
 			cfg.AI.ACPCWD = tt.cwd
 			if err := cfg.Validate(); err == nil {
 				t.Error("Expected ACP path validation error, got nil")
@@ -229,7 +229,7 @@ func TestFromEnv(t *testing.T) {
 		"MCP_CRON_AI_MODEL":                  os.Getenv("MCP_CRON_AI_MODEL"),
 		"MCP_CRON_AI_MAX_TOOL_ITERATIONS":    os.Getenv("MCP_CRON_AI_MAX_TOOL_ITERATIONS"),
 		"MCP_CRON_MCP_CONFIG_FILE_PATH":      os.Getenv("MCP_CRON_MCP_CONFIG_FILE_PATH"),
-		"MCP_CRON_ACP_SOCKET":                os.Getenv("MCP_CRON_ACP_SOCKET"),
+		"MCP_CRON_ACP_COMMAND":               os.Getenv("MCP_CRON_ACP_COMMAND"),
 		"MCP_CRON_ACP_CWD":                   os.Getenv("MCP_CRON_ACP_CWD"),
 		"MCP_CRON_STORE_DB_PATH":             os.Getenv("MCP_CRON_STORE_DB_PATH"),
 	}
@@ -265,7 +265,7 @@ func TestFromEnv(t *testing.T) {
 	_ = os.Setenv("MCP_CRON_AI_MODEL", "gpt-4-turbo")
 	_ = os.Setenv("MCP_CRON_AI_MAX_TOOL_ITERATIONS", "30")
 	_ = os.Setenv("MCP_CRON_MCP_CONFIG_FILE_PATH", "/tmp/mcp.json")
-	_ = os.Setenv("MCP_CRON_ACP_SOCKET", "/run/test-agent/acp.sock")
+	_ = os.Setenv("MCP_CRON_ACP_COMMAND", "test-agent --acp")
 	_ = os.Setenv("MCP_CRON_ACP_CWD", "/tmp/project")
 	_ = os.Setenv("MCP_CRON_STORE_DB_PATH", "/tmp/custom-results.db")
 
@@ -316,8 +316,8 @@ func TestFromEnv(t *testing.T) {
 	if cfg.AI.MCPConfigFilePath != "/tmp/mcp.json" {
 		t.Errorf("Expected MCP config file path '/tmp/mcp.json', got '%s'", cfg.AI.MCPConfigFilePath)
 	}
-	if cfg.AI.ACPSocket != "/run/test-agent/acp.sock" {
-		t.Errorf("Expected ACP socket path '/run/test-agent/acp.sock', got '%s'", cfg.AI.ACPSocket)
+	if cfg.AI.ACPCommand != "test-agent --acp" {
+		t.Errorf("Expected ACP command 'test-agent --acp', got '%s'", cfg.AI.ACPCommand)
 	}
 	if cfg.AI.ACPCWD != "/tmp/project" {
 		t.Errorf("Expected ACP working directory '/tmp/project', got '%s'", cfg.AI.ACPCWD)

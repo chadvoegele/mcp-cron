@@ -165,8 +165,9 @@ type AIConfig struct {
 	// Ignored when Provider is ProviderACP.
 	MCPConfigFilePath string
 
-	// ACPSocket is the Unix socket path for the ACP agent.
-	ACPSocket string
+	// ACPCommand starts the ACP agent over stdio. Arguments support shell
+	// quoting, but are not evaluated by a shell.
+	ACPCommand string
 
 	// ACPCWD is the working directory to use for ACP sessions.
 	ACPCWD string
@@ -205,7 +206,7 @@ func DefaultConfig() *Config {
 			Model:             "gpt-4o",
 			MaxToolIterations: 20,
 			MCPConfigFilePath: filepath.Join(home, ".cursor", "mcp.json"),
-			ACPSocket:         "",
+			ACPCommand:        "",
 			ACPCWD:            "",
 		},
 	}
@@ -240,11 +241,8 @@ func (c *Config) Validate() error {
 	case "", ProviderOpenAI, ProviderAnthropic:
 		// Empty provider preserves the default OpenAI behavior.
 	case ProviderACP:
-		if strings.TrimSpace(c.AI.ACPSocket) == "" {
-			return fmt.Errorf("ACP socket path is required when provider is %q", ProviderACP)
-		}
-		if !filepath.IsAbs(c.AI.ACPSocket) {
-			return fmt.Errorf("ACP socket path must be absolute: %q", c.AI.ACPSocket)
+		if strings.TrimSpace(c.AI.ACPCommand) == "" {
+			return fmt.Errorf("ACP command is required when provider is %q", ProviderACP)
 		}
 		if strings.TrimSpace(c.AI.ACPCWD) == "" {
 			return fmt.Errorf("ACP working directory is required when provider is %q", ProviderACP)
@@ -350,8 +348,8 @@ func FromEnv(config *Config) {
 		config.AI.MCPConfigFilePath = val
 	}
 
-	if val := os.Getenv("MCP_CRON_ACP_SOCKET"); val != "" {
-		config.AI.ACPSocket = val
+	if val := os.Getenv("MCP_CRON_ACP_COMMAND"); val != "" {
+		config.AI.ACPCommand = val
 	}
 
 	if val := os.Getenv("MCP_CRON_ACP_CWD"); val != "" {

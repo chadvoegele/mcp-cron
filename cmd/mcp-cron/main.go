@@ -36,7 +36,7 @@ var (
 	aiModel         = flag.String("ai-model", "", "AI model to use for AI tasks (default: gpt-4o; ignored with --ai-provider acp)")
 	aiMaxIterations = flag.Int("ai-max-iterations", 0, "Maximum iterations for tool-enabled AI tasks (default: 20)")
 	mcpConfigPath   = flag.String("mcp-config-path", "", "Path to MCP configuration file (default: ~/.cursor/mcp.json; ignored with --ai-provider acp)")
-	acpSocket       = flag.String("acp-socket", "", "Absolute Unix socket path for the ACP agent (required with --ai-provider acp)")
+	acpCommand      = flag.String("acp-command", "", "Command (with quoted arguments) to start the ACP agent over stdio (required with --ai-provider acp)")
 	acpCWD          = flag.String("acp-cwd", "", "Absolute working directory for ACP sessions (required with --ai-provider acp)")
 	dbPath          = flag.String("db-path", "", "Path to SQLite database for result history (default: ~/.mcp-cron/results.db)")
 	preventSleep    = flag.Bool("prevent-sleep", false, "Prevent system from sleeping while mcp-cron is running (macOS and Windows only)")
@@ -136,8 +136,8 @@ func applyCommandLineFlagsToConfig(cfg *config.Config) {
 	if *mcpConfigPath != "" {
 		cfg.AI.MCPConfigFilePath = *mcpConfigPath
 	}
-	if *acpSocket != "" {
-		cfg.AI.ACPSocket = *acpSocket
+	if *acpCommand != "" {
+		cfg.AI.ACPCommand = *acpCommand
 	}
 	if *acpCWD != "" {
 		cfg.AI.ACPCWD = *acpCWD

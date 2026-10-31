@@ -261,7 +261,7 @@ func TestRunACPTaskLifecycleAndOutput(t *testing.T) {
 	})
 
 	cfg := config.DefaultConfig()
-	cfg.AI.ACPSocket = socketPath
+	cfg.AI.ACPCommand = socketPath
 	cfg.AI.ACPCWD = cwd
 
 	output, err := RunACPTask(context.Background(), "do the thing", cfg)
@@ -313,7 +313,7 @@ func TestRunACPTaskRejectsInitializeResponses(t *testing.T) {
 			})
 
 			cfg := config.DefaultConfig()
-			cfg.AI.ACPSocket = server.socketPath()
+			cfg.AI.ACPCommand = server.socketPath()
 			cfg.AI.ACPCWD = "/workspace"
 			_, err := RunACPTask(context.Background(), "prompt", cfg)
 			if !errors.Is(err, tt.want) {
@@ -368,7 +368,7 @@ func TestRunACPTaskAcceptsOptionalTerminalAuthenticationMethod(t *testing.T) {
 	})
 
 	cfg := config.DefaultConfig()
-	cfg.AI.ACPSocket = server.socketPath()
+	cfg.AI.ACPCommand = server.socketPath()
 	cfg.AI.ACPCWD = "/workspace"
 	output, err := RunACPTask(context.Background(), "prompt", cfg)
 	if err != nil {
@@ -404,7 +404,7 @@ func TestRunACPTaskReportsLaterAuthenticationRequired(t *testing.T) {
 	})
 
 	cfg := config.DefaultConfig()
-	cfg.AI.ACPSocket = server.socketPath()
+	cfg.AI.ACPCommand = server.socketPath()
 	cfg.AI.ACPCWD = "/workspace"
 	_, err := RunACPTask(context.Background(), "prompt", cfg)
 	if err == nil {
@@ -416,7 +416,7 @@ func TestRunACPTaskReportsLaterAuthenticationRequired(t *testing.T) {
 	server.waitForDisconnect(t)
 }
 
-func TestRunACPTaskStopReasonsOverUnixSocket(t *testing.T) {
+func TestRunACPTaskStopReasonsOverStdio(t *testing.T) {
 	tests := []struct {
 		name       string
 		reason     acp.StopReason
@@ -459,7 +459,7 @@ func TestRunACPTaskStopReasonsOverUnixSocket(t *testing.T) {
 			})
 
 			cfg := config.DefaultConfig()
-			cfg.AI.ACPSocket = server.socketPath()
+			cfg.AI.ACPCommand = server.socketPath()
 			cfg.AI.ACPCWD = "/workspace"
 			output, err := RunACPTask(context.Background(), "prompt", cfg)
 			if (err != nil) != tt.wantErr {
@@ -476,7 +476,7 @@ func TestRunACPTaskStopReasonsOverUnixSocket(t *testing.T) {
 	}
 }
 
-func TestRunACPTaskRequestFailuresCloseUnixSocket(t *testing.T) {
+func TestRunACPTaskRequestFailuresCloseCommand(t *testing.T) {
 	tests := []struct {
 		name  string
 		stage string
@@ -537,7 +537,7 @@ func TestRunACPTaskRequestFailuresCloseUnixSocket(t *testing.T) {
 			})
 
 			cfg := config.DefaultConfig()
-			cfg.AI.ACPSocket = server.socketPath()
+			cfg.AI.ACPCommand = server.socketPath()
 			cfg.AI.ACPCWD = "/workspace"
 			output, err := RunACPTask(context.Background(), "prompt", cfg)
 			if err == nil {
@@ -554,7 +554,7 @@ func TestRunACPTaskRequestFailuresCloseUnixSocket(t *testing.T) {
 	}
 }
 
-func TestRunACPTaskCancellationBeforeSessionClosesUnixSocket(t *testing.T) {
+func TestRunACPTaskCancellationBeforeSessionClosesCommand(t *testing.T) {
 	tests := []struct {
 		name  string
 		stage string
@@ -593,7 +593,7 @@ func TestRunACPTaskCancellationBeforeSessionClosesUnixSocket(t *testing.T) {
 			})
 
 			cfg := config.DefaultConfig()
-			cfg.AI.ACPSocket = server.socketPath()
+			cfg.AI.ACPCommand = server.socketPath()
 			cfg.AI.ACPCWD = "/workspace"
 			ctx, cancel := context.WithCancel(context.Background())
 			resultCh := make(chan error, 1)
@@ -621,14 +621,14 @@ func TestRunACPTaskCancellationBeforeSessionClosesUnixSocket(t *testing.T) {
 	}
 }
 
-func TestRunACPTaskConnectionFailure(t *testing.T) {
+func TestRunACPTaskStartFailure(t *testing.T) {
 	cfg := config.DefaultConfig()
-	cfg.AI.ACPSocket = filepath.Join(t.TempDir(), "missing.sock")
+	cfg.AI.ACPCommand = filepath.Join(t.TempDir(), "missing-agent")
 	cfg.AI.ACPCWD = "/workspace"
 
 	output, err := RunACPTask(context.Background(), "prompt", cfg)
 	if err == nil {
-		t.Fatal("RunACPTask returned nil error for a missing socket")
+		t.Fatal("RunACPTask returned nil error for a missing command")
 	}
 	if output != "" {
 		t.Fatalf("output = %q, want empty output", output)
@@ -702,7 +702,7 @@ func TestRunACPTaskCancellationSendsSessionCancel(t *testing.T) {
 	})
 
 	cfg := config.DefaultConfig()
-	cfg.AI.ACPSocket = socketPath
+	cfg.AI.ACPCommand = socketPath
 	cfg.AI.ACPCWD = "/workspace"
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

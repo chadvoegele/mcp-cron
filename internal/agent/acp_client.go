@@ -5,18 +5,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/google/shlex"
 	"github.com/jolks/mcp-cron/internal/config"
 )
 
 const (
-	acpConnectionTimeout = 10 * time.Second
-	acpCancelWriteGrace  = 250 * time.Millisecond
+	acpShutdownTimeout  = time.Second
+	acpCancelWriteGrace = 250 * time.Millisecond
 )
 
 var (
@@ -30,31 +32,66 @@ var (
 // RunACPTask executes one prompt in an isolated ACP session.
 //
 // The caller owns the context and its deadline. This function does not add a
-// task timeout of its own; the same context covers dialing and every ACP
+// task timeout of its own; the same context covers every ACP
 // request in the lifecycle.
 func RunACPTask(ctx context.Context, prompt string, cfg *config.Config) (string, error) {
 	if cfg == nil {
 		return "", errors.New("ACP configuration is nil")
 	}
 
-	dialer := net.Dialer{Timeout: acpConnectionTimeout}
-	socket, err := dialer.DialContext(ctx, "unix", cfg.AI.ACPSocket)
+	args, err := shlex.Split(cfg.AI.ACPCommand)
 	if err != nil {
-		return "", fmt.Errorf("connect to ACP socket %q: %w", cfg.AI.ACPSocket, err)
+		return "", fmt.Errorf("parse ACP command: %w", err)
+	}
+	if len(args) == 0 || args[0] == "" {
+		return "", errors.New("ACP command is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 
-	stopSocketWatcher, err := watchACPContext(ctx, socket)
+	// Do not use CommandContext: the SDK must send session/cancel before
+	// shutdown closes stdin or kills an unresponsive agent.
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Stderr = os.Stderr
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		_ = socket.Close()
-		return "", fmt.Errorf("configure ACP socket deadlines: %w", err)
+		return "", fmt.Errorf("ACP stdin: %w", err)
+	}
+	defer stdin.Close()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("ACP stdout: %w", err)
+	}
+	defer stdout.Close()
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start ACP command: %w", err)
 	}
 	defer func() {
-		stopSocketWatcher()
-		_ = socket.Close()
+		_ = stdin.Close()
+		done := make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(done)
+		}()
+		timer := time.NewTimer(acpShutdownTimeout)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			_ = cmd.Process.Kill()
+			<-done
+		}
 	}()
 
+	stopPipeWatcher, err := watchACPContext(ctx, stdin.(*os.File), stdout.(*os.File))
+	if err != nil {
+		return "", fmt.Errorf("configure ACP pipe deadlines: %w", err)
+	}
+	defer stopPipeWatcher()
+
 	client := &acpClient{}
-	connection := acp.NewClientSideConnection(client, socket, socket)
+	connection := acp.NewClientSideConnection(client, stdin, stdout)
 
 	initResponse, err := connection.Initialize(ctx, acp.InitializeRequest{
 		ProtocolVersion:    acp.ProtocolVersionNumber,
@@ -86,7 +123,7 @@ func RunACPTask(ctx context.Context, prompt string, cfg *config.Config) (string,
 	})
 	client.setPromptActive(false)
 	if err != nil && acpContextExpired(ctx) {
-		cancelACPSession(stopSocketWatcher, socket, connection, session.SessionId)
+		cancelACPSession(stopPipeWatcher, stdin.(*os.File), connection, session.SessionId)
 	}
 	output := client.output()
 	if err != nil {
@@ -99,12 +136,15 @@ func RunACPTask(ctx context.Context, prompt string, cfg *config.Config) (string,
 	return output, nil
 }
 
-// watchACPContext applies the context deadline to socket I/O and makes
-// cancellation wake both reads and writes. The returned function stops and
-// joins the watcher so it cannot overwrite a later deadline during cleanup.
-func watchACPContext(ctx context.Context, socket net.Conn) (func(), error) {
+// watchACPContext bounds pipe I/O even when an agent stops reading stdin.
+// The returned function joins the watcher before cancellation gets a fresh
+// write deadline.
+func watchACPContext(ctx context.Context, stdin, stdout *os.File) (func(), error) {
 	if deadline, ok := ctx.Deadline(); ok {
-		if err := socket.SetDeadline(deadline); err != nil {
+		if err := stdin.SetWriteDeadline(deadline); err != nil {
+			return nil, err
+		}
+		if err := stdout.SetReadDeadline(deadline); err != nil {
 			return nil, err
 		}
 	}
@@ -116,7 +156,8 @@ func watchACPContext(ctx context.Context, socket net.Conn) (func(), error) {
 		defer close(done)
 		select {
 		case <-ctx.Done():
-			_ = socket.SetDeadline(time.Now())
+			_ = stdin.SetWriteDeadline(time.Now())
+			_ = stdout.SetReadDeadline(time.Now())
 		case <-stop:
 		}
 	}()
@@ -135,19 +176,17 @@ func acpContextExpired(ctx context.Context) bool {
 	return ok && !time.Now().Before(deadline)
 }
 
-// cancelACPSession preserves the expired read deadline while allowing one
-// short, bounded attempt to send the required session/cancel notification.
+// cancelACPSession allows a bounded attempt to send session/cancel after
+// the task deadline expires.
 func cancelACPSession(
-	stopSocketWatcher func(),
-	socket net.Conn,
+	stopPipeWatcher func(),
+	stdin *os.File,
 	connection *acp.ClientSideConnection,
 	sessionID acp.SessionId,
 ) {
-	stopSocketWatcher()
+	stopPipeWatcher()
 
-	now := time.Now()
-	_ = socket.SetReadDeadline(now)
-	if err := socket.SetWriteDeadline(now.Add(acpCancelWriteGrace)); err != nil {
+	if err := stdin.SetWriteDeadline(time.Now().Add(acpCancelWriteGrace)); err != nil {
 		return
 	}
 

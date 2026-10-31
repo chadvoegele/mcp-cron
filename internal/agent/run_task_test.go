@@ -209,7 +209,7 @@ func TestRunTaskACPBypassesMCPAndAPIProvider(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	cfg.AI.Provider = config.ProviderACP
-	cfg.AI.ACPSocket = socketPath
+	cfg.AI.ACPCommand = socketPath
 	cfg.AI.ACPCWD = "/workspace"
 	cfg.AI.MCPConfigFilePath = filepath.Join(t.TempDir(), "missing-mcp.json")
 	cfg.AI.OpenAIAPIKey = ""

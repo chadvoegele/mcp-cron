@@ -156,7 +156,7 @@ func TestExecuteAgentTaskACPResultLifecycle(t *testing.T) {
 	store := newMockResultStore()
 	cfg := config.DefaultConfig()
 	cfg.AI.Provider = config.ProviderACP
-	cfg.AI.ACPSocket = startACPResultServer(t, "completed output", "end_turn")
+	cfg.AI.ACPCommand = startACPResultServer(t, "completed output", "end_turn")
 	cfg.AI.ACPCWD = "/workspace"
 	executor := NewAgentExecutor(cfg, store, testLogger())
 
@@ -187,7 +187,7 @@ func TestExecuteAgentTaskACPFailurePreservesPartialOutput(t *testing.T) {
 	store := newMockResultStore()
 	cfg := config.DefaultConfig()
 	cfg.AI.Provider = config.ProviderACP
-	cfg.AI.ACPSocket = startACPResultServer(t, "partial output", "max_tokens")
+	cfg.AI.ACPCommand = startACPResultServer(t, "partial output", "max_tokens")
 	cfg.AI.ACPCWD = "/workspace"
 	executor := NewAgentExecutor(cfg, store, testLogger())
 
@@ -214,7 +214,7 @@ func TestExecuteAgentTaskACPFailurePreservesPartialOutput(t *testing.T) {
 func TestExecuteAgentTaskACPFailureUsesErrorOutputFallback(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.AI.Provider = config.ProviderACP
-	cfg.AI.ACPSocket = startACPResultServer(t, "", "refusal")
+	cfg.AI.ACPCommand = startACPResultServer(t, "", "refusal")
 	cfg.AI.ACPCWD = "/workspace"
 	executor := NewAgentExecutor(cfg, nil, testLogger())
 
@@ -278,7 +278,7 @@ func TestExecuteAgentTaskACPTimeoutPersistsPartialOutput(t *testing.T) {
 	store := newMockResultStore()
 	cfg := config.DefaultConfig()
 	cfg.AI.Provider = config.ProviderACP
-	cfg.AI.ACPSocket = socketPath
+	cfg.AI.ACPCommand = socketPath
 	cfg.AI.ACPCWD = "/workspace"
 	executor := NewAgentExecutor(cfg, store, testLogger())
 
@@ -339,7 +339,7 @@ func TestExecuteAgentTaskACPBlockedPromptWritePersistsFailure(t *testing.T) {
 		}
 
 		// Do not read session/prompt. A sufficiently large request must block in
-		// the client's socket write until the task context expires.
+		// the client's pipe write until the task context expires.
 		close(promptReady)
 		<-releaseServer
 		return nil
@@ -349,7 +349,7 @@ func TestExecuteAgentTaskACPBlockedPromptWritePersistsFailure(t *testing.T) {
 	store := newMockResultStore()
 	cfg := config.DefaultConfig()
 	cfg.AI.Provider = config.ProviderACP
-	cfg.AI.ACPSocket = server.socketPath()
+	cfg.AI.ACPCommand = server.socketPath()
 	cfg.AI.ACPCWD = "/workspace"
 	executor := NewAgentExecutor(cfg, store, testLogger())
 
@@ -370,12 +370,12 @@ func TestExecuteAgentTaskACPBlockedPromptWritePersistsFailure(t *testing.T) {
 	select {
 	case result = <-resultCh:
 	case <-time.After(2 * time.Second):
-		t.Fatal("ExecuteAgentTask blocked on a full ACP socket write")
+		t.Fatal("ExecuteAgentTask blocked on a full ACP pipe write")
 	}
 	release()
 	server.waitForDisconnect(t)
 
-	maxDuration := timeout + acpCancelWriteGrace + 500*time.Millisecond
+	maxDuration := timeout + acpCancelWriteGrace + acpShutdownTimeout + 500*time.Millisecond
 	if elapsed := time.Since(promptStarted); elapsed > maxDuration {
 		t.Fatalf("ExecuteAgentTask took %s after the prompt write started, want at most %s", elapsed, maxDuration)
 	}

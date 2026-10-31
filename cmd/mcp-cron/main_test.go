@@ -29,16 +29,16 @@ func testLogger() *logging.Logger {
 
 func TestApplyCommandLineFlagsToConfigACP(t *testing.T) {
 	oldProvider := *aiProvider
-	oldSocket := *acpSocket
+	oldCommand := *acpCommand
 	oldCWD := *acpCWD
 	defer func() {
 		*aiProvider = oldProvider
-		*acpSocket = oldSocket
+		*acpCommand = oldCommand
 		*acpCWD = oldCWD
 	}()
 
 	*aiProvider = config.ProviderACP
-	*acpSocket = "/run/my-agent/acp.sock"
+	*acpCommand = `my-agent --name "cron agent"`
 	*acpCWD = "/home/chad/project"
 
 	cfg := config.DefaultConfig()
@@ -47,8 +47,8 @@ func TestApplyCommandLineFlagsToConfigACP(t *testing.T) {
 	if cfg.AI.Provider != config.ProviderACP {
 		t.Errorf("Expected provider %q, got %q", config.ProviderACP, cfg.AI.Provider)
 	}
-	if cfg.AI.ACPSocket != "/run/my-agent/acp.sock" {
-		t.Errorf("Expected ACP socket path to be applied, got %q", cfg.AI.ACPSocket)
+	if cfg.AI.ACPCommand != `my-agent --name "cron agent"` {
+		t.Errorf("Expected ACP command to be applied, got %q", cfg.AI.ACPCommand)
 	}
 	if cfg.AI.ACPCWD != "/home/chad/project" {
 		t.Errorf("Expected ACP working directory to be applied, got %q", cfg.AI.ACPCWD)

@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -155,9 +157,32 @@ func (s *FakeAgent) cleanup(t testing.TB) {
 	}
 }
 
-// SocketPath returns the Unix socket path served by the fake peer.
-func (s *FakeAgent) SocketPath() string {
-	return s.path
+// Command starts a stdio bridge to the fake peer. This exercises the real
+// subprocess transport while keeping handlers in the parent test process.
+func (s *FakeAgent) Command() string {
+	executable, err := os.Executable()
+	if err != nil {
+		panic(err)
+	}
+	return strconv.Quote(executable) + " --acp-test-bridge " + strconv.Quote(s.path)
+}
+
+func init() {
+	if len(os.Args) != 3 || os.Args[1] != "--acp-test-bridge" {
+		return
+	}
+	conn, err := net.Dial("unix", os.Args[2])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	go func() {
+		_, _ = io.Copy(conn, os.Stdin)
+		_ = conn.Close()
+	}()
+	_, _ = io.Copy(os.Stdout, conn)
+	_ = conn.Close()
+	os.Exit(0)
 }
 
 // WaitForDisconnect waits until all expected client connections have closed.
