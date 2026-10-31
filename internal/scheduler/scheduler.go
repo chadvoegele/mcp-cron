@@ -80,8 +80,6 @@ func (s *Scheduler) AddTask(task *model.Task) error {
 		return errors.InvalidInput("schedule and run_at are mutually exclusive")
 	}
 
-	// Compute next_run only for an enabled recurring or one-shot task. A
-	// disabled or on-demand task must not retain a false execution trigger.
 	task.NextRun = time.Time{}
 	if task.Enabled {
 		switch {
@@ -154,7 +152,6 @@ func (s *Scheduler) EnableTask(taskID string) error {
 	task.Status = model.StatusPending
 	task.UpdatedAt = s.now()
 
-	// Arm recurring and one-shot tasks; on-demand tasks remain idle.
 	if task.Schedule != "" {
 		nextRun, err := s.computeNextRun(task.Schedule)
 		if err != nil {
@@ -248,7 +245,6 @@ func (s *Scheduler) UpdateTask(task *model.Task) error {
 		return errors.InvalidInput("schedule and run_at are mutually exclusive")
 	}
 
-	// Recompute next_run from the final task mode.
 	task.NextRun = time.Time{}
 	if task.Enabled {
 		switch {
@@ -339,8 +335,6 @@ func (s *Scheduler) LoadTasks() error {
 			continue // skip duplicates
 		}
 		s.tasks[task.ID] = task
-		// Repair next_run for enabled recurring and one-shot tasks that do not
-		// have an armed execution time. On-demand tasks remain idle.
 		if task.Enabled && task.NextRun.IsZero() {
 			var nextRun time.Time
 			switch {
@@ -437,10 +431,6 @@ func (s *Scheduler) pollTick() {
 	}
 
 	for _, task := range dueTasks {
-		// A one-shot is claimed by consuming its configured run_at before its
-		// executor is started. This is intentionally separate from the
-		// recurring/on-demand next_run advancement path: a successful claim is
-		// permanent, even when execution later fails or the process exits.
 		if task.Schedule == "" && task.RunAt != nil {
 			claimed, err := s.taskStore.ConsumeOneShot(task.ID, task.NextRun)
 			if err != nil {
@@ -448,10 +438,9 @@ func (s *Scheduler) pollTick() {
 				continue
 			}
 			if !claimed {
-				continue // Another instance got it, or the task was changed.
+				continue
 			}
 
-			// Reflect the durable claim in memory before the executor starts.
 			s.mu.Lock()
 			if memTask, exists := s.tasks[task.ID]; exists {
 				memTask.Enabled = false

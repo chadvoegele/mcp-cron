@@ -126,8 +126,6 @@ func validateTaskParams(name string) error {
 	return nil
 }
 
-// parseRunAt validates an optional RFC 3339 timestamp and normalizes it to
-// UTC for task storage and comparison.
 func parseRunAt(value *string) (*time.Time, error) {
 	if value == nil {
 		return nil, nil
@@ -141,7 +139,6 @@ func parseRunAt(value *string) (*time.Time, error) {
 	return &runAt, nil
 }
 
-// validateTaskSchedule ensures the final task mode is unambiguous.
 func validateTaskSchedule(schedule string, runAt *time.Time) error {
 	if schedule != "" && runAt != nil {
 		return errors.InvalidInput("schedule and run_at are mutually exclusive")

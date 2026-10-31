@@ -280,7 +280,6 @@ func TestOneShotUpdateOmissionNullAndMergedConflict(t *testing.T) {
 		t.Fatalf("merged conflict error = %q, want invalid input error", err)
 	}
 
-	// The rejected update must not have changed the one-shot task.
 	unchanged, err := server.scheduler.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("get task after rejected update: %v", err)

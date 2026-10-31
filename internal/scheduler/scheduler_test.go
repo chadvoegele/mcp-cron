@@ -636,15 +636,15 @@ func TestPersistenceRoundTrip(t *testing.T) {
 		UpdatedAt:   now,
 	}
 	aiTask := &model.Task{
-		ID:        "persist-ai",
-		Name:      "AI Task",
-		Type:      model.TypeAI,
-		Prompt:    "Summarize the news",
-		Schedule:  "0 9 * * *",
-		Enabled:   false,
-		Status:    model.StatusPending,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:          "persist-ai",
+		Name:        "AI Task",
+		Type:        model.TypeAI,
+		Prompt:      "Summarize the news",
+		Schedule:    "0 9 * * *",
+		Enabled:     false,
+		Status:      model.StatusPending,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 
 	if err := s1.AddTask(shellTask); err != nil {

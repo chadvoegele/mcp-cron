@@ -446,15 +446,8 @@ func (s *MCPServer) handleUpdateTask(_ context.Context, request *mcp.CallToolReq
 		return nil, err
 	}
 
-	// Update fields with provided values on a copy so invalid requests do not
-	// partially mutate the in-memory task.
+	// Update fields with provided values
 	updatedTask := *existingTask
-	if existingTask.Headers != nil {
-		updatedTask.Headers = make(map[string]string, len(existingTask.Headers))
-		for key, value := range existingTask.Headers {
-			updatedTask.Headers[key] = value
-		}
-	}
 	if err := updateTaskFields(&updatedTask, params, request.Params.Arguments); err != nil {
 		return nil, err
 	}

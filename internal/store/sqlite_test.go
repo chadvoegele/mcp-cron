@@ -393,15 +393,15 @@ func TestSaveAndLoadHTTPTask(t *testing.T) {
 
 	now := time.Now().Truncate(time.Microsecond)
 	task := &model.Task{
-		ID:        "http-task-1",
-		Name:      "Webhook Task",
-		Type:      "http",
-		URL:       "https://example.com/hook",
-		Method:    "POST",
-		Headers:   map[string]string{"Authorization": "Bearer secret", "X-Source": "mcp-cron"},
-		Body:      `{"hello":"world"}`,
-		Schedule:  "@hourly",
-		Enabled:   true,
+		ID:       "http-task-1",
+		Name:     "Webhook Task",
+		Type:     "http",
+		URL:      "https://example.com/hook",
+		Method:   "POST",
+		Headers:  map[string]string{"Authorization": "Bearer secret", "X-Source": "mcp-cron"},
+		Body:     `{"hello":"world"}`,
+		Schedule: "@hourly",
+		Enabled:  true,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}

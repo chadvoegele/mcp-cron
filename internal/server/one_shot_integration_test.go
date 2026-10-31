@@ -38,9 +38,6 @@ func newOneShotIntegrationStoreAt(t *testing.T, dbPath string) *store.SQLiteStor
 	return sqlStore
 }
 
-// newOneShotIntegrationServer assembles the production scheduler and executor
-// routing without opening a network transport. Tests start the scheduler only
-// after their task definitions have been persisted and loaded as needed.
 func newOneShotIntegrationServer(t *testing.T, sqlStore *store.SQLiteStore) *MCPServer {
 	t.Helper()
 	cfg := config.DefaultConfig()

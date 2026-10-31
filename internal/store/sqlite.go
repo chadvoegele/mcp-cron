@@ -46,8 +46,6 @@ func parseTime(value string) time.Time {
 
 func taskTimeValues(task *model.Task, preserveOnDemandNextRun bool) (runAt, nextRun string) {
 	runAt = formatOptionalTime(task.RunAt)
-	// Disabled tasks must not retain an execution trigger. UpdateTask also
-	// persists the temporary next_run used by RunTaskNow for on-demand tasks.
 	if task.Enabled && (task.Schedule != "" || task.RunAt != nil || preserveOnDemandNextRun) {
 		nextRun = formatTime(task.NextRun)
 	}
@@ -192,8 +190,8 @@ func (s *SQLiteStore) SaveTask(task *model.Task) error {
 		task.Schedule,
 		runAt,
 		boolToInt(task.Enabled),
-		formatTime(task.CreatedAt),
-		formatTime(task.UpdatedAt),
+		task.CreatedAt.Format(timeFormat),
+		task.UpdatedAt.Format(timeFormat),
 		nextRun,
 	)
 	if err != nil {
@@ -224,7 +222,7 @@ func (s *SQLiteStore) UpdateTask(task *model.Task) error {
 		task.Schedule,
 		runAt,
 		boolToInt(task.Enabled),
-		formatTime(task.UpdatedAt),
+		task.UpdatedAt.Format(timeFormat),
 		nextRun,
 		task.ID,
 	)
@@ -264,8 +262,8 @@ func scanTask(rows *sql.Rows) (*model.Task, error) {
 		return nil, fmt.Errorf("scan task row: %w", err)
 	}
 	t.Enabled = enabled != 0
-	t.CreatedAt = parseTime(createdStr)
-	t.UpdatedAt = parseTime(updatedStr)
+	t.CreatedAt, _ = time.Parse(timeFormat, createdStr)
+	t.UpdatedAt, _ = time.Parse(timeFormat, updatedStr)
 	if nextRunStr != "" {
 		t.NextRun = parseTime(nextRunStr)
 	}
@@ -359,9 +357,6 @@ func (s *SQLiteStore) AdvanceNextRun(taskID string, currentNextRun time.Time, ne
 	return rows == 1, nil
 }
 
-// ConsumeOneShot atomically consumes an enabled one-shot task whose next_run
-// still matches currentNextRun. It returns true only when this call consumed
-// exactly one task.
 func (s *SQLiteStore) ConsumeOneShot(taskID string, currentNextRun time.Time) (bool, error) {
 	result, err := s.db.Exec(`
 		UPDATE tasks SET run_at = '', next_run = '', enabled = 0, updated_at = ?
