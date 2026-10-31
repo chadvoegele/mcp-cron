@@ -4,7 +4,9 @@ go 1.25.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.22.0
+	github.com/coder/acp-go-sdk v0.13.5
 	github.com/gofrs/flock v0.13.0
+	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/openai/openai-go/v3 v3.24.0
 	github.com/robfig/cron/v3 v3.0.1

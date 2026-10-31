@@ -27,6 +27,34 @@ func testLogger() *logging.Logger {
 	return logging.New(logging.Options{Output: io.Discard, Level: logging.Fatal})
 }
 
+func TestApplyCommandLineFlagsToConfigACP(t *testing.T) {
+	oldProvider := *aiProvider
+	oldCommand := *acpCommand
+	oldCWD := *acpCWD
+	defer func() {
+		*aiProvider = oldProvider
+		*acpCommand = oldCommand
+		*acpCWD = oldCWD
+	}()
+
+	*aiProvider = config.ProviderACP
+	*acpCommand = `my-agent --name "cron agent"`
+	*acpCWD = "/home/chad/project"
+
+	cfg := config.DefaultConfig()
+	applyCommandLineFlagsToConfig(cfg)
+
+	if cfg.AI.Provider != config.ProviderACP {
+		t.Errorf("Expected provider %q, got %q", config.ProviderACP, cfg.AI.Provider)
+	}
+	if cfg.AI.ACPCommand != `my-agent --name "cron agent"` {
+		t.Errorf("Expected ACP command to be applied, got %q", cfg.AI.ACPCommand)
+	}
+	if cfg.AI.ACPCWD != "/home/chad/project" {
+		t.Errorf("Expected ACP working directory to be applied, got %q", cfg.AI.ACPCWD)
+	}
+}
+
 // TestMCPServerCreation tests server creation with custom configs
 func TestMCPServerCreation(t *testing.T) {
 	// Test creating MCP server with custom config

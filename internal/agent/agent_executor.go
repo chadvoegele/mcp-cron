@@ -79,7 +79,11 @@ func (ae *AgentExecutor) ExecuteAgentTask(
 	if err != nil {
 		result.Error = err.Error()
 		result.ExitCode = 1
-		result.Output = fmt.Sprintf("Error executing AI task: %v", err)
+		if output != "" {
+			result.Output = output
+		} else {
+			result.Output = fmt.Sprintf("Error executing AI task: %v", err)
+		}
 	} else {
 		result.Output = output
 		result.ExitCode = 0
