@@ -19,6 +19,39 @@ import (
 
 const timeFormat = time.RFC3339Nano
 
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(timeFormat)
+}
+
+func formatOptionalTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.UTC().Format(timeFormat)
+}
+
+func parseTime(value string) time.Time {
+	if value == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(timeFormat, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return t.UTC()
+}
+
+func taskTimeValues(task *model.Task, preserveOnDemandNextRun bool) (runAt, nextRun string) {
+	runAt = formatOptionalTime(task.RunAt)
+	if task.Enabled && (task.Schedule != "" || task.RunAt != nil || preserveOnDemandNextRun) {
+		nextRun = formatTime(task.NextRun)
+	}
+	return runAt, nextRun
+}
+
 // SQLiteStore implements model.ResultStore backed by a SQLite database.
 type SQLiteStore struct {
 	db *sql.DB
@@ -136,17 +169,14 @@ func (s *SQLiteStore) GetResults(taskID string, limit int) ([]*model.Result, err
 
 // SaveTask persists a new task definition.
 func (s *SQLiteStore) SaveTask(task *model.Task) error {
-	nextRun := ""
-	if !task.NextRun.IsZero() {
-		nextRun = task.NextRun.Format(timeFormat)
-	}
+	runAt, nextRun := taskTimeValues(task, false)
 	headersJSON, err := marshalHeaders(task.Headers)
 	if err != nil {
 		return err
 	}
 	_, err = s.db.Exec(`
-		INSERT INTO tasks (id, name, description, type, command, prompt, url, method, headers_json, body, schedule, enabled, created_at, updated_at, next_run)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO tasks (id, name, description, type, command, prompt, url, method, headers_json, body, schedule, run_at, enabled, created_at, updated_at, next_run)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.ID,
 		task.Name,
 		task.Description,
@@ -158,6 +188,7 @@ func (s *SQLiteStore) SaveTask(task *model.Task) error {
 		headersJSON,
 		task.Body,
 		task.Schedule,
+		runAt,
 		boolToInt(task.Enabled),
 		task.CreatedAt.Format(timeFormat),
 		task.UpdatedAt.Format(timeFormat),
@@ -171,16 +202,13 @@ func (s *SQLiteStore) SaveTask(task *model.Task) error {
 
 // UpdateTask updates an existing task definition.
 func (s *SQLiteStore) UpdateTask(task *model.Task) error {
-	nextRun := ""
-	if !task.NextRun.IsZero() {
-		nextRun = task.NextRun.Format(timeFormat)
-	}
+	runAt, nextRun := taskTimeValues(task, true)
 	headersJSON, err := marshalHeaders(task.Headers)
 	if err != nil {
 		return err
 	}
 	result, err := s.db.Exec(`
-		UPDATE tasks SET name=?, description=?, type=?, command=?, prompt=?, url=?, method=?, headers_json=?, body=?, schedule=?, enabled=?, updated_at=?, next_run=?
+		UPDATE tasks SET name=?, description=?, type=?, command=?, prompt=?, url=?, method=?, headers_json=?, body=?, schedule=?, run_at=?, enabled=?, updated_at=?, next_run=?
 		WHERE id=?`,
 		task.Name,
 		task.Description,
@@ -192,6 +220,7 @@ func (s *SQLiteStore) UpdateTask(task *model.Task) error {
 		headersJSON,
 		task.Body,
 		task.Schedule,
+		runAt,
 		boolToInt(task.Enabled),
 		task.UpdatedAt.Format(timeFormat),
 		nextRun,
@@ -223,11 +252,11 @@ func (s *SQLiteStore) DeleteTask(taskID string) error {
 func scanTask(rows *sql.Rows) (*model.Task, error) {
 	var t model.Task
 	var enabled int
-	var createdStr, updatedStr, nextRunStr, headersJSON string
+	var createdStr, updatedStr, nextRunStr, runAtStr, headersJSON string
 	if err := rows.Scan(
 		&t.ID, &t.Name, &t.Description, &t.Type,
 		&t.Command, &t.Prompt, &t.URL, &t.Method, &headersJSON, &t.Body,
-		&t.Schedule,
+		&t.Schedule, &runAtStr,
 		&enabled, &createdStr, &updatedStr, &nextRunStr,
 	); err != nil {
 		return nil, fmt.Errorf("scan task row: %w", err)
@@ -236,7 +265,11 @@ func scanTask(rows *sql.Rows) (*model.Task, error) {
 	t.CreatedAt, _ = time.Parse(timeFormat, createdStr)
 	t.UpdatedAt, _ = time.Parse(timeFormat, updatedStr)
 	if nextRunStr != "" {
-		t.NextRun, _ = time.Parse(timeFormat, nextRunStr)
+		t.NextRun = parseTime(nextRunStr)
+	}
+	if runAtStr != "" {
+		runAt := parseTime(runAtStr)
+		t.RunAt = &runAt
 	}
 	if headersJSON != "" {
 		_ = json.Unmarshal([]byte(headersJSON), &t.Headers)
@@ -248,7 +281,7 @@ func scanTask(rows *sql.Rows) (*model.Task, error) {
 // LoadTasks returns all persisted task definitions.
 func (s *SQLiteStore) LoadTasks() ([]*model.Task, error) {
 	rows, err := s.db.Query(`
-		SELECT id, name, description, type, command, prompt, url, method, headers_json, body, schedule, enabled, created_at, updated_at, next_run
+		SELECT id, name, description, type, command, prompt, url, method, headers_json, body, schedule, run_at, enabled, created_at, updated_at, next_run
 		FROM tasks`)
 	if err != nil {
 		return nil, fmt.Errorf("query tasks: %w", err)
@@ -275,10 +308,10 @@ func (s *SQLiteStore) LoadTasks() ([]*model.Task, error) {
 // GetDueTasks returns all enabled tasks whose next_run is at or before the given time.
 func (s *SQLiteStore) GetDueTasks(now time.Time) ([]*model.Task, error) {
 	rows, err := s.db.Query(`
-		SELECT id, name, description, type, command, prompt, url, method, headers_json, body, schedule, enabled, created_at, updated_at, next_run
+		SELECT id, name, description, type, command, prompt, url, method, headers_json, body, schedule, run_at, enabled, created_at, updated_at, next_run
 		FROM tasks
 		WHERE enabled = 1 AND next_run != '' AND next_run <= ?`,
-		now.Format(timeFormat))
+		formatTime(now))
 	if err != nil {
 		return nil, fmt.Errorf("query due tasks: %w", err)
 	}
@@ -304,15 +337,15 @@ func (s *SQLiteStore) GetDueTasks(now time.Time) ([]*model.Task, error) {
 func (s *SQLiteStore) AdvanceNextRun(taskID string, currentNextRun time.Time, newNextRun time.Time) (bool, error) {
 	newNextRunStr := ""
 	if !newNextRun.IsZero() {
-		newNextRunStr = newNextRun.Format(timeFormat)
+		newNextRunStr = formatTime(newNextRun)
 	}
 	result, err := s.db.Exec(`
 		UPDATE tasks SET next_run = ?, updated_at = ?
 		WHERE id = ? AND next_run = ?`,
 		newNextRunStr,
-		time.Now().Format(timeFormat),
+		formatTime(time.Now()),
 		taskID,
-		currentNextRun.Format(timeFormat),
+		formatTime(currentNextRun),
 	)
 	if err != nil {
 		return false, fmt.Errorf("advance next_run: %w", err)
@@ -320,6 +353,24 @@ func (s *SQLiteStore) AdvanceNextRun(taskID string, currentNextRun time.Time, ne
 	rows, err := result.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("check advance result: %w", err)
+	}
+	return rows == 1, nil
+}
+
+func (s *SQLiteStore) ConsumeOneShot(taskID string, currentNextRun time.Time) (bool, error) {
+	result, err := s.db.Exec(`
+		UPDATE tasks SET run_at = '', next_run = '', enabled = 0, updated_at = ?
+		WHERE id = ? AND enabled = 1 AND run_at != '' AND next_run = ?`,
+		formatTime(time.Now()),
+		taskID,
+		formatTime(currentNextRun),
+	)
+	if err != nil {
+		return false, fmt.Errorf("consume one-shot task: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("check consume result: %w", err)
 	}
 	return rows == 1, nil
 }
